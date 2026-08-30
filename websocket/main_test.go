@@ -6,6 +6,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -23,6 +24,11 @@ func testServer(t *testing.T) (*Server, *httptest.Server) {
 
 func connectBoard(t *testing.T, httpServer *httptest.Server, boardID string) *websocket.Conn {
 	t.Helper()
+	return connectBoardWithActions(t, httpServer, boardID, []Action{ActionTap})
+}
+
+func connectBoardWithActions(t *testing.T, httpServer *httptest.Server, boardID string, actions []Action) *websocket.Conn {
+	t.Helper()
 	url := "ws" + strings.TrimPrefix(httpServer.URL, "http") + "/board"
 	conn, _, err := websocket.DefaultDialer.Dial(url, nil)
 	if err != nil {
@@ -33,7 +39,7 @@ func connectBoard(t *testing.T, httpServer *httptest.Server, boardID string) *we
 		Type:             "board.ready",
 		ProtocolVersion:  ProtocolVersion,
 		BoardID:          boardID,
-		SupportedActions: []Action{ActionTap},
+		SupportedActions: actions,
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -245,7 +251,7 @@ func TestDashboardReportsCurrentInstruction(t *testing.T) {
 	}
 }
 
-func TestCompletedRoundDashboardRetainsInstruction(t *testing.T) {
+func TestCompletedStepDashboardShowsNextInstruction(t *testing.T) {
 	_, httpServer := testServer(t)
 	conn := connectBoard(t, httpServer, "fast-board")
 	startGame(t, httpServer)
@@ -253,7 +259,7 @@ func TestCompletedRoundDashboardRetainsInstruction(t *testing.T) {
 	if err := conn.WriteJSON(ActionDetected{
 		Type:      "action.detected",
 		RoundID:   instruction.RoundID,
-		Action:    ActionTap,
+		Action:    instruction.Action,
 		ElapsedMS: intPointer(1),
 	}); err != nil {
 		t.Fatal(err)
@@ -262,14 +268,65 @@ func TestCompletedRoundDashboardRetainsInstruction(t *testing.T) {
 	if err := conn.ReadJSON(&result); err != nil {
 		t.Fatal(err)
 	}
+	next := readInstruction(t, conn)
 
 	state := getState(t, httpServer)
 	if len(state.Boards) != 1 {
 		t.Fatalf("got %d boards, want 1", len(state.Boards))
 	}
 	board := state.Boards[0]
-	if board.Status != StatusWaiting || board.Instruction == nil || *board.Instruction != instruction {
-		t.Fatalf("dashboard lost completed instruction: board=%+v instruction=%+v", board, instruction)
+	if board.Status != StatusPlaying || board.Instruction == nil || *board.Instruction != next {
+		t.Fatalf("dashboard missing next instruction: board=%+v instruction=%+v", board, next)
+	}
+}
+
+func TestGameStartsAtTwoSecondDifficulty(t *testing.T) {
+	_, httpServer := testServer(t)
+	_, instruction := connectStartedBoard(t, httpServer, "board-1")
+	if instruction.TimeoutMS != 2000 {
+		t.Fatalf("first timeout = %d, want 2000", instruction.TimeoutMS)
+	}
+}
+
+func TestBoardPlaysSixtySupportedStepsAcrossSixDifficultyRounds(t *testing.T) {
+	_, httpServer := testServer(t)
+	conn := connectBoardWithActions(t, httpServer, "board-1", []Action{ActionTwist})
+	startGame(t, httpServer)
+	instruction := readInstruction(t, conn)
+	conn.SetReadDeadline(time.Now().Add(time.Second))
+
+	for step := 1; step <= 60; step++ {
+		wantTimeout := int(difficultyTimeouts[(step-1)/stepsPerRound] / time.Millisecond)
+		if instruction.RoundID != strconv.Itoa(step) || instruction.TimeoutMS != wantTimeout {
+			t.Fatalf("step %d instruction = %+v, want round ID %d and timeout %d", step, instruction, step, wantTimeout)
+		}
+		if instruction.Action != ActionTwist {
+			t.Fatalf("step %d requested unsupported action %q", step, instruction.Action)
+		}
+		if err := conn.WriteJSON(ActionDetected{
+			Type:      "action.detected",
+			RoundID:   instruction.RoundID,
+			Action:    instruction.Action,
+			ElapsedMS: intPointer(1),
+		}); err != nil {
+			t.Fatal(err)
+		}
+		var result RoundResult
+		if err := conn.ReadJSON(&result); err != nil {
+			t.Fatal(err)
+		}
+		if result.Result != ResultSuccess || result.Score != step {
+			t.Fatalf("step %d result = %+v", step, result)
+		}
+		if step < 60 {
+			instruction = readInstruction(t, conn)
+		}
+	}
+	conn.SetReadDeadline(time.Now().Add(100 * time.Millisecond))
+	if _, _, err := conn.ReadMessage(); err == nil {
+		t.Fatal("received instruction after step 60")
+	} else if netErr, ok := err.(net.Error); !ok || !netErr.Timeout() {
+		t.Fatalf("read after game end = %v, want timeout", err)
 	}
 }
 
@@ -357,12 +414,15 @@ func TestWatchdogCompletesNoResponse(t *testing.T) {
 
 func TestCompletedRoundIgnoresStaleAction(t *testing.T) {
 	sess := &session{
-		send:   make(chan any, 2),
-		done:   make(chan struct{}),
-		active: &round{id: "1"},
+		send:    make(chan any, 2),
+		done:    make(chan struct{}),
+		actions: []Action{ActionTap},
+		active:  &round{id: "1", action: ActionTap, timeout: roundTimeout},
+		step:    1,
 	}
 	action := ActionDetected{Type: "action.detected", RoundID: "1", Action: ActionTap, ElapsedMS: intPointer(10)}
 	sess.complete(action)
+	<-sess.send
 	<-sess.send
 
 	sess.complete(action)

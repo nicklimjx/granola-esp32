@@ -7,7 +7,10 @@ type Action string
 type Result string
 
 const (
-	ActionTap Action = "tap"
+	ActionTap   Action = "tap"
+	ActionTwist Action = "twist"
+	ActionSwipe Action = "swipe"
+	ActionPress Action = "press"
 
 	ResultSuccess     Result = "success"
 	ResultWrongAction Result = "wrong_action"

@@ -114,9 +114,9 @@ protocol.
    | 21–30 | 1400 |
    | 31–40 | 1200 |
    | 41–50 | 1000 |
-   | 51+ | 800 |
+   | 51–60 | 800 |
 
-   If an instruction arrives with `timeoutMs` absent or `0`, the board falls
+   The server ends the game after step 60. If an instruction arrives with `timeoutMs` absent or `0`, the board falls
    back to this same table, counting instructions locally, and logs a warning.
    That is a safety net, not the intended path — `roundId` is an opaque string,
    so the board cannot derive the real round number from it.

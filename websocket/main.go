@@ -4,8 +4,10 @@ import (
 	_ "embed"
 	"encoding/json"
 	"log"
+	"math/rand"
 	"net/http"
 	"sort"
+	"strconv"
 	"sync"
 	"time"
 
@@ -16,11 +18,21 @@ import (
 var dashboardHTML []byte
 
 const (
-	roundTimeout   = 1500 * time.Millisecond
+	roundTimeout   = 2 * time.Second
 	networkGrace   = 250 * time.Millisecond
 	readyTimeout   = 5 * time.Second
 	maxMessageSize = 4 << 10
+	stepsPerRound  = 10
 )
+
+var difficultyTimeouts = [...]time.Duration{
+	2 * time.Second,
+	1700 * time.Millisecond,
+	1400 * time.Millisecond,
+	1200 * time.Millisecond,
+	1 * time.Second,
+	800 * time.Millisecond,
+}
 
 type Server struct {
 	mu         sync.Mutex
@@ -33,21 +45,25 @@ type Server struct {
 }
 
 type round struct {
-	id    string
-	timer *time.Timer
+	id      string
+	action  Action
+	timeout time.Duration
+	timer   *time.Timer
 }
 
 type session struct {
-	server *Server
-	conn   *websocket.Conn
-	board  string
-	send   chan any
-	done   chan struct{}
-	stop   sync.Once
+	server  *Server
+	conn    *websocket.Conn
+	board   string
+	actions []Action
+	send    chan any
+	done    chan struct{}
+	stop    sync.Once
 
 	mu     sync.Mutex
 	active *round
 	latest *Instruction
+	step   int
 	score  int
 }
 
@@ -248,11 +264,12 @@ func (s *Server) board(w http.ResponseWriter, r *http.Request) {
 	}
 
 	sess := &session{
-		server: s,
-		conn:   conn,
-		board:  ready.BoardID,
-		send:   make(chan any, 4),
-		done:   make(chan struct{}),
+		server:  s,
+		conn:    conn,
+		board:   ready.BoardID,
+		actions: append([]Action(nil), ready.SupportedActions...),
+		send:    make(chan any, 4),
+		done:    make(chan struct{}),
 	}
 	admitted, startRound := s.register(sess)
 	if !admitted {
@@ -285,15 +302,15 @@ func (s *Server) board(w http.ResponseWriter, r *http.Request) {
 }
 
 func validReady(ready BoardReady) bool {
-	if ready.Type != "board.ready" || ready.ProtocolVersion != ProtocolVersion || ready.BoardID == "" {
+	if ready.Type != "board.ready" || ready.ProtocolVersion != ProtocolVersion || ready.BoardID == "" || len(ready.SupportedActions) == 0 {
 		return false
 	}
 	for _, action := range ready.SupportedActions {
-		if action == ActionTap {
-			return true
+		if action == "" {
+			return false
 		}
 	}
-	return false
+	return true
 }
 
 func (s *Server) register(sess *session) (admitted, startRound bool) {
@@ -353,14 +370,21 @@ func (s *session) display() DisplayBoard {
 }
 
 func (s *session) startRound() {
-	r := &round{id: "1"}
+	s.mu.Lock()
+	if s.step == len(difficultyTimeouts)*stepsPerRound {
+		s.mu.Unlock()
+		return
+	}
+	s.step++
+	timeout := difficultyTimeouts[(s.step-1)/stepsPerRound]
+	action := s.actions[rand.Intn(len(s.actions))]
+	r := &round{id: strconv.Itoa(s.step), action: action, timeout: timeout}
 	instruction := Instruction{
 		Type:      "instruction",
 		RoundID:   r.id,
-		Action:    ActionTap,
-		TimeoutMS: int(roundTimeout / time.Millisecond),
+		Action:    r.action,
+		TimeoutMS: int(timeout / time.Millisecond),
 	}
-	s.mu.Lock()
 	s.active = r
 	s.latest = &instruction
 	s.mu.Unlock()
@@ -384,17 +408,18 @@ func (s *session) complete(action ActionDetected) {
 	}
 
 	result := ResultSuccess
-	if *action.ElapsedMS > int(roundTimeout/time.Millisecond) {
+	if *action.ElapsedMS > int(r.timeout/time.Millisecond) {
 		result = ResultTimeout
-	} else if action.Action != ActionTap {
+	} else if action.Action != r.action {
 		result = ResultWrongAction
 	} else {
-		s.score = 1
+		s.score++
 	}
 	score := s.score
 	s.mu.Unlock()
 
 	s.enqueue(RoundResult{Type: "round.result", RoundID: r.id, Result: result, Score: score})
+	s.startRound()
 	if s.server != nil {
 		s.server.broadcastState()
 	}
@@ -406,7 +431,7 @@ func (s *session) armWatchdog(roundID string) {
 	if s.active == nil || s.active.id != roundID || s.active.timer != nil {
 		return
 	}
-	s.active.timer = time.AfterFunc(roundTimeout+networkGrace, func() {
+	s.active.timer = time.AfterFunc(s.active.timeout+networkGrace, func() {
 		s.completeTimeout(roundID)
 	})
 }
@@ -422,6 +447,7 @@ func (s *session) completeTimeout(roundID string) {
 	s.mu.Unlock()
 
 	s.enqueue(RoundResult{Type: "round.result", RoundID: roundID, Result: ResultTimeout, Score: score})
+	s.startRound()
 	if s.server != nil {
 		s.server.broadcastState()
 	}
