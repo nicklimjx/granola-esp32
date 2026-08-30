@@ -9,7 +9,7 @@ cd websocket
 go run .
 ```
 
-The server listens on `:8080`; boards connect to `ws://<server-ip>:8080/board`. `GET /state` reports lobby state; `POST /start` locks the currently connected roster and starts one independent round for each board.
+The server listens on `:8080`; boards connect to `ws://<server-ip>:8080/board`. Open `http://<server-ip>:8080/` for the browser lobby. Its `/dashboard` WebSocket receives full state snapshots and starts the game with `{"type":"game.start"}`. `GET /state` and `POST /start` remain available for simple clients and tests.
 
 ## Messages
 
@@ -53,7 +53,8 @@ Ends the round and provides the authoritative score.
 
 - Each WebSocket belongs to the `boardId` sent in `board.ready`.
 - Before start, connected boards wait in the lobby and appear on the dashboard.
-- `POST /start` locks the connected roster and starts one independent active round per roster board.
+- A dashboard `game.start` command (or `POST /start`) locks the connected roster and sends the same `tap` instruction and timeout to every connected roster board.
+- Dashboard clients receive a full state snapshot when board connection, instruction, result, or score state changes.
 - Locked disconnected boards remain on the dashboard. Boards that first connect after start are excluded and receive no round.
 - A new connection with the same `boardId` replaces and closes the older connection. A locked board may reconnect and receive its one round again.
 - Round IDs only need to be unique within one board's state.

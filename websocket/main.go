@@ -1,6 +1,7 @@
 package main
 
 import (
+	_ "embed"
 	"encoding/json"
 	"log"
 	"net/http"
@@ -11,6 +12,9 @@ import (
 	"github.com/gorilla/websocket"
 )
 
+//go:embed dashboard.html
+var dashboardHTML []byte
+
 const (
 	roundTimeout   = 1500 * time.Millisecond
 	networkGrace   = 250 * time.Millisecond
@@ -19,12 +23,13 @@ const (
 )
 
 type Server struct {
-	mu       sync.Mutex
-	boards   map[string]*session
-	roster   map[string]bool
-	scores   map[string]int
-	started  bool
-	upgrader websocket.Upgrader
+	mu         sync.Mutex
+	boards     map[string]*session
+	roster     map[string]bool
+	scores     map[string]int
+	dashboards map[*dashboardClient]bool
+	started    bool
+	upgrader   websocket.Upgrader
 }
 
 type round struct {
@@ -33,11 +38,12 @@ type round struct {
 }
 
 type session struct {
-	conn  *websocket.Conn
-	board string
-	send  chan any
-	done  chan struct{}
-	stop  sync.Once
+	server *Server
+	conn   *websocket.Conn
+	board  string
+	send   chan any
+	done   chan struct{}
+	stop   sync.Once
 
 	mu     sync.Mutex
 	active *round
@@ -45,20 +51,45 @@ type session struct {
 	score  int
 }
 
+type dashboardClient struct {
+	conn *websocket.Conn
+	send chan DisplayEvent
+	done chan struct{}
+	stop sync.Once
+}
+
 func newServer() *Server {
 	return &Server{
-		boards: make(map[string]*session),
-		roster: make(map[string]bool),
-		scores: make(map[string]int),
+		boards:     make(map[string]*session),
+		roster:     make(map[string]bool),
+		scores:     make(map[string]int),
+		dashboards: make(map[*dashboardClient]bool),
 	}
 }
 
 func (s *Server) routes() http.Handler {
 	mux := http.NewServeMux()
+	mux.HandleFunc("/", s.dashboardPage)
 	mux.HandleFunc("/state", s.state)
 	mux.HandleFunc("/start", s.start)
 	mux.HandleFunc("/board", s.board)
+	mux.HandleFunc("/dashboard", s.dashboard)
 	return mux
+}
+
+func (s *Server) dashboardPage(w http.ResponseWriter, r *http.Request) {
+	if r.URL.Path != "/" {
+		http.NotFound(w, r)
+		return
+	}
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	if _, err := w.Write(dashboardHTML); err != nil {
+		log.Printf("write dashboard page: %v", err)
+	}
 }
 
 func (s *Server) state(w http.ResponseWriter, r *http.Request) {
@@ -75,13 +106,20 @@ func (s *Server) start(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	s.mu.Lock()
-	var sessions []*session
-	if !s.started && len(s.boards) == 0 {
-		s.mu.Unlock()
+	if !s.startGame() {
 		http.Error(w, "no boards connected", http.StatusConflict)
 		return
 	}
+	s.writeState(w)
+}
+
+func (s *Server) startGame() bool {
+	s.mu.Lock()
+	if !s.started && len(s.boards) == 0 {
+		s.mu.Unlock()
+		return false
+	}
+	var sessions []*session
 	if !s.started {
 		s.started = true
 		for boardID, sess := range s.boards {
@@ -94,7 +132,8 @@ func (s *Server) start(w http.ResponseWriter, r *http.Request) {
 	for _, sess := range sessions {
 		sess.startRound()
 	}
-	s.writeState(w)
+	s.broadcastState()
+	return true
 }
 
 func (s *Server) writeState(w http.ResponseWriter) {
@@ -136,6 +175,51 @@ func (s *Server) displayState() DisplayEvent {
 	return DisplayEvent{Type: "state", Boards: boards, Started: started}
 }
 
+func (s *Server) dashboard(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	conn, err := s.upgrader.Upgrade(w, r, nil)
+	if err != nil {
+		return
+	}
+	conn.SetReadLimit(maxMessageSize)
+	client := &dashboardClient{conn: conn, send: make(chan DisplayEvent, 1), done: make(chan struct{})}
+
+	s.mu.Lock()
+	s.dashboards[client] = true
+	s.mu.Unlock()
+	defer func() {
+		s.mu.Lock()
+		delete(s.dashboards, client)
+		s.mu.Unlock()
+		client.close()
+	}()
+
+	go client.writeLoop()
+	client.enqueue(s.displayState())
+	for {
+		var command DashboardCommand
+		if err := conn.ReadJSON(&command); err != nil {
+			return
+		}
+		if command.Type != "game.start" {
+			return
+		}
+		s.startGame()
+	}
+}
+
+func (s *Server) broadcastState() {
+	state := s.displayState()
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for client := range s.dashboards {
+		client.enqueue(state)
+	}
+}
+
 func (s *Server) board(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -164,10 +248,11 @@ func (s *Server) board(w http.ResponseWriter, r *http.Request) {
 	}
 
 	sess := &session{
-		conn:  conn,
-		board: ready.BoardID,
-		send:  make(chan any, 4),
-		done:  make(chan struct{}),
+		server: s,
+		conn:   conn,
+		board:  ready.BoardID,
+		send:   make(chan any, 4),
+		done:   make(chan struct{}),
 	}
 	admitted, startRound := s.register(sess)
 	if !admitted {
@@ -231,6 +316,7 @@ func (s *Server) register(sess *session) (admitted, startRound bool) {
 	if old != nil {
 		old.close()
 	}
+	s.broadcastState()
 	return true, startRound
 }
 
@@ -243,6 +329,7 @@ func (s *Server) unregister(sess *session) {
 		delete(s.boards, sess.board)
 	}
 	s.mu.Unlock()
+	s.broadcastState()
 }
 
 func (s *Server) boardScore(boardID string) int {
@@ -279,6 +366,9 @@ func (s *session) startRound() {
 	s.mu.Unlock()
 
 	s.enqueue(instruction)
+	if s.server != nil {
+		s.server.broadcastState()
+	}
 }
 
 func (s *session) complete(action ActionDetected) {
@@ -305,6 +395,9 @@ func (s *session) complete(action ActionDetected) {
 	s.mu.Unlock()
 
 	s.enqueue(RoundResult{Type: "round.result", RoundID: r.id, Result: result, Score: score})
+	if s.server != nil {
+		s.server.broadcastState()
+	}
 }
 
 func (s *session) armWatchdog(roundID string) {
@@ -329,6 +422,9 @@ func (s *session) completeTimeout(roundID string) {
 	s.mu.Unlock()
 
 	s.enqueue(RoundResult{Type: "round.result", RoundID: roundID, Result: ResultTimeout, Score: score})
+	if s.server != nil {
+		s.server.broadcastState()
+	}
 }
 
 func (s *session) enqueue(message any) {
@@ -365,6 +461,43 @@ func (s *session) close() {
 		s.mu.Unlock()
 		close(s.done)
 		s.conn.Close()
+	})
+}
+
+func (c *dashboardClient) enqueue(state DisplayEvent) {
+	select {
+	case c.send <- state:
+		return
+	default:
+	}
+	select {
+	case <-c.send:
+	default:
+	}
+	select {
+	case c.send <- state:
+	case <-c.done:
+	}
+}
+
+func (c *dashboardClient) writeLoop() {
+	for {
+		select {
+		case state := <-c.send:
+			if err := c.conn.WriteJSON(state); err != nil {
+				c.close()
+				return
+			}
+		case <-c.done:
+			return
+		}
+	}
+}
+
+func (c *dashboardClient) close() {
+	c.stop.Do(func() {
+		close(c.done)
+		c.conn.Close()
 	})
 }
 

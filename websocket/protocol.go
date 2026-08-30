@@ -14,6 +14,10 @@ const (
 	ResultTimeout     Result = "timeout"
 )
 
+type DashboardCommand struct {
+	Type string `json:"type"`
+}
+
 type BoardReady struct {
 	Type             string   `json:"type"`
 	ProtocolVersion  int      `json:"protocolVersion"`

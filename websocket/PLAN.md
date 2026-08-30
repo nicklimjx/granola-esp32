@@ -79,15 +79,15 @@ Add one small state-transition test covering:
 
 ## 5. Add a minimal browser page
 
-Show only:
+**Implemented:** a responsive tile-grid lobby at `GET /`.
 
-- Start and reset controls.
-- Connected boards and board selection.
-- Current instruction for the selected board.
-- Last detected action.
-- Score.
+- Connected boards wait as tiles before start.
+- The dashboard receives full snapshots over `/dashboard`.
+- Start locks the current roster and sends one shared `tap` instruction to every locked board.
+- Locked disconnected boards remain visible; late boards are excluded.
+- Tiles show connection/round status, current instruction, and score.
 
-Use ordinary HTTP endpoints and simple polling initially. The browser does not need its own WebSocket.
+Reset, game replay, board selection, and frontend frameworks remain out of scope.
 
 ## Work split
 

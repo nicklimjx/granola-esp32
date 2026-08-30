@@ -40,6 +40,31 @@ func connectBoard(t *testing.T, httpServer *httptest.Server, boardID string) *we
 	return conn
 }
 
+func connectDashboard(t *testing.T, httpServer *httptest.Server) *websocket.Conn {
+	t.Helper()
+	url := "ws" + strings.TrimPrefix(httpServer.URL, "http") + "/dashboard"
+	conn, _, err := websocket.DefaultDialer.Dial(url, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { conn.Close() })
+	return conn
+}
+
+func readDashboardUntil(t *testing.T, conn *websocket.Conn, matches func(DisplayEvent) bool) DisplayEvent {
+	t.Helper()
+	conn.SetReadDeadline(time.Now().Add(time.Second))
+	for {
+		var state DisplayEvent
+		if err := conn.ReadJSON(&state); err != nil {
+			t.Fatal(err)
+		}
+		if matches(state) {
+			return state
+		}
+	}
+}
+
 func startGame(t *testing.T, httpServer *httptest.Server) DisplayEvent {
 	t.Helper()
 	response, err := http.Post(httpServer.URL+"/start", "application/json", nil)
@@ -94,6 +119,17 @@ func intPointer(value int) *int {
 	return &value
 }
 
+func TestBoardReceivesNoInstructionBeforeStart(t *testing.T) {
+	_, httpServer := testServer(t)
+	conn := connectBoard(t, httpServer, "waiting-board")
+	conn.SetReadDeadline(time.Now().Add(100 * time.Millisecond))
+	if _, _, err := conn.ReadMessage(); err == nil {
+		t.Fatal("board received a message before game start")
+	} else if netErr, ok := err.(net.Error); !ok || !netErr.Timeout() {
+		t.Fatalf("read before start = %v, want timeout", err)
+	}
+}
+
 func TestLobbyReportsConnectedBoardWaiting(t *testing.T) {
 	_, httpServer := testServer(t)
 	connectBoard(t, httpServer, "lobby-board")
@@ -139,8 +175,11 @@ func TestStartLocksRosterAndExcludesLateBoard(t *testing.T) {
 	first := connectBoard(t, httpServer, "first")
 	second := connectBoard(t, httpServer, "second")
 	startGame(t, httpServer)
-	readInstruction(t, first)
-	readInstruction(t, second)
+	firstInstruction := readInstruction(t, first)
+	secondInstruction := readInstruction(t, second)
+	if firstInstruction != secondInstruction {
+		t.Fatalf("locked boards received different instructions: first=%+v second=%+v", firstInstruction, secondInstruction)
+	}
 
 	first.Close()
 	deadline := time.Now().Add(time.Second)
@@ -164,6 +203,29 @@ func TestStartLocksRosterAndExcludesLateBoard(t *testing.T) {
 	state := getState(t, httpServer)
 	if len(state.Boards) != 2 || state.Boards[0].BoardID != "first" || state.Boards[1].BoardID != "second" {
 		t.Fatalf("late board changed locked roster: %+v", state.Boards)
+	}
+}
+
+func TestDashboardSocketStartsGameAndReceivesSnapshots(t *testing.T) {
+	_, httpServer := testServer(t)
+	board := connectBoard(t, httpServer, "dashboard-board")
+	dashboard := connectDashboard(t, httpServer)
+
+	lobby := readDashboardUntil(t, dashboard, func(state DisplayEvent) bool {
+		return !state.Started && len(state.Boards) == 1
+	})
+	if lobby.Boards[0].Status != StatusWaiting {
+		t.Fatalf("unexpected dashboard lobby: %+v", lobby)
+	}
+	if err := dashboard.WriteJSON(DashboardCommand{Type: "game.start"}); err != nil {
+		t.Fatal(err)
+	}
+	instruction := readInstruction(t, board)
+	started := readDashboardUntil(t, dashboard, func(state DisplayEvent) bool {
+		return state.Started && len(state.Boards) == 1 && state.Boards[0].Status == StatusPlaying
+	})
+	if started.Boards[0].Instruction == nil || *started.Boards[0].Instruction != instruction {
+		t.Fatalf("dashboard snapshot missing instruction: state=%+v instruction=%+v", started, instruction)
 	}
 }
 
