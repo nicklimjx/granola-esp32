@@ -2,28 +2,25 @@
 //
 // Game — the single-player round loop.
 //
-// The server picks the moves, sets the timeout and owns the score; the board
+// The browser picks the moves, sets the timeout and owns the score; the board
 // detects actions and measures reaction time. One round looks like:
 //
 //   instruction         -> window opens, prompt on screen, clock starts
 //   first action        -> action.detected sent, board stops accepting input
 //   (or window expires) -> board stops accepting input, sends nothing; the
-//                          server is the one that declares a timeout
+//                          browser is the one that declares a timeout
 //   round.result        -> verdict and score on screen
 //
-// Only the first action in a round counts, matching the server's rule. The
+// Only the first action in a round counts, matching the browser's rule. The
 // board never decides success or failure itself; it renders what round.result
 // says.
-//
-// Multiplayer needs no change here: each board runs its own instance and the
-// board ID in board.ready keeps the two players apart.
 //
 
 #include <stdint.h>
 
 #include "../input/input_manager.h"
 #include "../net/protocol.h"
-#include "../net/ws_link.h"
+#include "../net/ble_link.h"
 #include "../ui/ui.h"
 #include "actions.h"
 
@@ -36,19 +33,19 @@ class Game {
     Feedback,        // showing the verdict for the round just finished
   };
 
-  void begin(WsLink* link, InputManager* input, Ui* ui);
+  void begin(BleLink* link, InputManager* input, Ui* ui);
 
   // Advances the clock and drains the input queue. Call every loop().
   void loop();
 
-  // Wired to WsLink. Safe to call from the socket callback.
+  // Wired to BleLink; handlers run from BleLink::loop(), never BLE callbacks.
   void onInstruction(const char* roundId, Action action, uint32_t timeoutMs);
   void onRoundResult(const char* roundId, RoundOutcome outcome, int32_t score);
   void onConnectionChange(bool connected);
 
-  // Fallback window used only when the server omits timeoutMs: 2000 ms for the
+  // Fallback window used only when the browser omits timeoutMs: 2000 ms for the
   // first 10 instructions, then one step shorter every 10, holding at 800 ms.
-  // The server normally owns this; see docs/PROTOCOL.md.
+  // The browser normally owns this; see docs/PROTOCOL.md.
   static uint32_t fallbackWindowMs(uint32_t instructionIndex);
 
   State state() const { return state_; }
@@ -58,7 +55,7 @@ class Game {
   void enterIdle();
   void renderIdle();
 
-  WsLink* link_ = nullptr;
+  BleLink* link_ = nullptr;
   InputManager* input_ = nullptr;
   Ui* ui_ = nullptr;
 
@@ -76,6 +73,6 @@ class Game {
   // Counts instructions since boot, only to drive fallbackWindowMs().
   uint32_t instructionIndex_ = 0;
 
-  // Last score the server told us. Displayed, never computed here.
+  // Last score the browser told us. Displayed, never computed here.
   int32_t score_ = 0;
 };

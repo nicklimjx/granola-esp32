@@ -10,7 +10,8 @@
     body { margin: 0; min-height: 100vh; background: radial-gradient(circle at top, #242938, #111318 55%); }
     header { display: flex; align-items: center; justify-content: space-between; gap: 1rem; padding: 1.25rem clamp(1rem, 4vw, 3rem); }
     h1 { margin: 0; font-size: clamp(1.4rem, 3vw, 2rem); }
-    #summary { color: #aeb5c4; margin-top: .25rem; }
+    #summary { color: #aeb5c4; margin-top: .25rem; text-transform: capitalize; }
+    .controls { display: flex; gap: .65rem; }
     button { border: 0; border-radius: .55rem; padding: .75rem 1.25rem; background: #6c63ff; color: white; font: inherit; font-weight: 700; cursor: pointer; }
     button:disabled { background: #464b57; color: #aeb5c4; cursor: default; }
     main { padding: 0 clamp(1rem, 4vw, 3rem) 3rem; }
@@ -27,50 +28,10 @@
 </head>
 <body>
   <header>
-    <div><h1>Granola Lobby</h1><div id="summary">Connecting...</div></div>
-    <button id="start" disabled>Start game</button>
+    <div><h1>Granola Lobby</h1><div id="summary">Connect a board over Bluetooth</div></div>
+    <div class="controls"><button id="connect">Connect board</button><button id="start" disabled>Start game</button></div>
   </header>
-  <main><div id="boards"></div><div id="empty">Waiting for boards to connect</div></main>
-  <script>
-    const boards = document.querySelector('#boards');
-    const empty = document.querySelector('#empty');
-    const summary = document.querySelector('#summary');
-    const start = document.querySelector('#start');
-    let state = { boards: [], started: false };
-    const socket = new WebSocket(`${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}/dashboard`);
-
-    function render(next) {
-      state = next;
-      boards.replaceChildren(...next.boards.map(board => {
-        const tile = document.createElement('section');
-        tile.className = `board ${board.status}`;
-        const title = document.createElement('h2');
-        title.textContent = board.boardId;
-        const status = document.createElement('span');
-        status.className = 'status';
-        status.textContent = board.status;
-        const instruction = document.createElement('p');
-        instruction.className = 'instruction';
-        instruction.textContent = board.instruction?.action || (next.started ? 'Waiting' : 'Ready');
-        const score = document.createElement('div');
-        score.className = 'score';
-        score.textContent = `Score ${board.score}`;
-        tile.append(title, status, instruction, score);
-        return tile;
-      }));
-      empty.hidden = next.boards.length > 0;
-      start.disabled = next.started || next.boards.length === 0;
-      start.textContent = next.started ? 'Game started' : 'Start game';
-      summary.textContent = next.started ? `${next.boards.length} boards locked` : `${next.boards.length} boards connected`;
-    }
-
-    socket.addEventListener('open', () => { summary.textContent = 'Connected'; });
-    socket.addEventListener('message', event => {
-      const message = JSON.parse(event.data);
-      if (message.type === 'state') render(message);
-    });
-    socket.addEventListener('close', () => { summary.textContent = 'Dashboard disconnected'; start.disabled = true; });
-    start.addEventListener('click', () => socket.send(JSON.stringify({ type: 'game.start' })));
-  </script>
+  <main><div id="boards"></div><div id="empty">No board connected</div></main>
+  <script type="module" src="/app.js"></script>
 </body>
 </html>

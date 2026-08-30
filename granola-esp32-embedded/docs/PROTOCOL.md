@@ -1,138 +1,76 @@
-# Board-side protocol notes
+# Board/browser BLE protocol
 
-The authoritative protocol is the server's (`websocket/protocol.go`, protocol
-version 1). This file records how the board implements it and the few points
-that need agreement between the two sides.
+Protocol version 1 keeps the existing JSON message shapes while replacing each
+WebSocket frame with a newline-delimited byte stream over Nordic UART BLE.
 
-Codec: [`src/net/protocol.h`](../src/net/protocol.h) /
-[`protocol.cpp`](../src/net/protocol.cpp). Socket, reconnect and callbacks:
-[`src/net/ws_link.h`](../src/net/ws_link.h).
+## GATT service
 
-## What the board sends
+| Role | UUID | Properties |
+| --- | --- | --- |
+| Service | `6e400001-b5a3-f393-e0a9-e50e24dcca9e` | - |
+| RX, browser to board | `6e400002-b5a3-f393-e0a9-e50e24dcca9e` | write |
+| TX, board to browser | `6e400003-b5a3-f393-e0a9-e50e24dcca9e` | indicate |
+
+Every JSON object ends in `\n`; receivers buffer arbitrary chunks until that
+delimiter. Browser writes and firmware indications are sequential chunks of at
+most 20 bytes. Subscribing to TX enqueues `board.ready`; each indicated chunk is
+advanced only after the browser acknowledges it.
+
+BLE stack callbacks only copy connection/data events into `BleLink`'s bounded
+queue. `BleLink::loop()` changes connection state, parses JSON, dispatches game
+handlers, sends indications, and restarts advertising after disconnect.
+
+## Board to browser
 
 ### `board.ready`
 
-Sent automatically on every connect, before anything else. The hardware is
-initialised in `setup()` before the socket is ever opened, so the board is
-always ready by the time the socket comes up.
-
 ```json
-{"type":"board.ready","protocolVersion":1,"boardId":"bopit-01",
- "supportedActions":["tap","twist","swipe","press"]}
+{"type":"board.ready","protocolVersion":1,"boardId":"bopit-01","supportedActions":["tap","twist","swipe","press"]}
 ```
-
-| `boardId` | Board |
-| --- | --- |
-| `bopit-01` | ESP32-S3-Touch-AMOLED-1.8 |
-| `bopit-02` | ESP32-S3-Touch-LCD-1.46 (not yet implemented) |
 
 ### `action.detected`
 
-Sent once per round, for the first action detected inside the window.
+The first action in an active window is reported. `elapsedMs` is measured with
+`millis()` from instruction receipt. Nothing is sent when no action occurs.
 
 ```json
 {"type":"action.detected","roundId":"12","action":"twist","elapsedMs":640}
 ```
 
-`elapsedMs` is measured with `millis()` from the instant the `instruction` frame
-is handled. The prompt repaint (~15 ms) happens after that stamp is taken, so
-`elapsedMs` includes it — it is time-from-instruction, not time-from-prompt, as
-the protocol specifies.
-
-**Nothing is sent when the window closes with no action.** The board stops
-accepting input and waits for the server's `round.result` with
-`result: "timeout"`.
-
-If the link is down when an action fires, the frame is dropped rather than
-queued — the server discards actions for completed rounds anyway.
-
-## What the board expects
+## Browser to board
 
 ### `instruction`
 
-Opens the window. `timeoutMs` is used as given.
+```json
+{"type":"instruction","roundId":"12","action":"tap","timeoutMs":1700}
+```
 
-An instruction naming an action outside `supportedActions` is logged and
-ignored, and no window opens. A missing or over-long (>40 char) `roundId` is
-rejected the same way — a truncated ID would make every subsequent
-`action.detected` a silent no-op on the server.
+The board rejects unsupported actions and unusable round IDs. A missing/zero
+`timeoutMs` uses the firmware's matching fallback table.
 
 ### `round.result`
 
-Renders the verdict and score. The board displays `score` and never computes
-one; `result` maps to `NICE` / `WRONG` / `TOO SLOW` on the panel.
-
-A `round.result` whose `roundId` is not the round the board is currently in is
-ignored, mirroring the server's own rule about unknown or completed round IDs.
-
-If no `round.result` arrives within 5 s the board returns to idle rather than
-sitting on a frozen screen (`cfg::kRoundResultTimeoutMs`).
-
-## Round lifecycle on the board
-
-```
-Idle            no round in flight, or link down
-  | instruction
-Awaiting        window open, prompt + countdown bar on screen
-  | first action detected -> action.detected sent
-  | or window expires     -> nothing sent
-AwaitingResult  input ignored, waiting on round.result
-  | round.result
-Feedback        verdict + score on screen for 350 ms
-  | -> Idle
+```json
+{"type":"round.result","roundId":"12","result":"success","score":5}
 ```
 
-Only the first action in a round counts, matching the server's rule: the input
-queue is flushed when the window opens, and further input is ignored from the
-moment the round closes.
+Results are `success`, `wrong_action`, or `timeout`. The board renders the
+browser-owned score and ignores results for a different round.
 
-A disconnect returns the board to `Idle` and abandons the round, per the
-protocol.
+## Round lifecycle
 
-## Three things to agree with the server side
+```text
+instruction -> Awaiting -> action.detected or local window close
+            -> AwaitingResult -> round.result -> Feedback (350 ms) -> Idle
+```
 
-1. **Action names.** The board advertises `tap`, `twist`, `swipe`, `press` —
-   `tap` matches the example in the spec, the other three are the board's
-   choice. They are defined in one place
-   ([`src/game/actions.h`](../src/game/actions.h)) if the server would rather
-   use different strings.
+The browser chooses one advertised action for each of 60 steps. Ten-step tiers
+use 2000/1700/1400/1200/1000/800 ms. Its watchdog resolves no-response rounds
+after the window plus 250 ms grace, waits 350 ms after every result, and stops
+after round 60. A disconnect abandons the active round.
 
-2. **`twist` and `swipe` carry no direction.** The detectors fire on rotation
-   or travel either way, so the server must not request `twist_left`-style
-   variants as things stand. The gyro sign *is* known inside
-   [`twist_detector.cpp`](../src/input/twist_detector.cpp), so
-   direction-specific twists are cheap to add if the game wants them; swipe
-   direction would need a little more work.
+## Browser constraint
 
-3. **The difficulty ramp is now server-side.** The board takes `timeoutMs` at
-   face value, so the intended ramp has to be implemented in Go:
-
-   | Round | `timeoutMs` |
-   | --- | --- |
-   | 1–10 | 2000 |
-   | 11–20 | 1700 |
-   | 21–30 | 1400 |
-   | 31–40 | 1200 |
-   | 41–50 | 1000 |
-   | 51–60 | 800 |
-
-   The server ends the game after step 60. If an instruction arrives with `timeoutMs` absent or `0`, the board falls
-   back to this same table, counting instructions locally, and logs a warning.
-   That is a safety net, not the intended path — `roundId` is an opaque string,
-   so the board cannot derive the real round number from it.
-
-## Keepalive
-
-The protocol requires no application-level heartbeat, and the board sends none.
-It does use RFC6455 ping/pong (5 s interval, 3 s pong timeout, 2 missed pongs
-before reconnecting) so that a board attached to an AP that has gone away
-notices. Every mainstream Go WebSocket library answers ping frames
-automatically; if the server does not, set `cfg::kWsUsePingPong = false` in
-[`include/app_config.h`](../include/app_config.h) — otherwise the board will
-reconnect every few seconds.
-
-## Multiplayer
-
-Nothing above is single-player-specific. Two boards connect to the same server
-and are told apart by `boardId`. Only the board-side pin map and UI need work
-for the second board.
+Selection must originate from a user gesture in a Web Bluetooth-capable
+Chromium browser. Serve the dashboard from `http://localhost`; arbitrary HTTP
+LAN origins are not secure contexts and cannot use `navigator.bluetooth`.

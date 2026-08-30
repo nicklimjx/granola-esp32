@@ -1,17 +1,14 @@
 #pragma once
 //
-// JSON codec for the board <-> Go server WebSocket protocol.
+// JSON codec for the board <-> browser BLE protocol.
 //
-// One JSON object per text frame, always with a "type" field. Four message
+// One newline-framed JSON object, always with a "type" field. Four message
 // types exist; the board sends two and receives two:
 //
-//   board.ready     board  -> server   identity + capabilities, on connect
-//   instruction     server -> board    starts one round
-//   action.detected board  -> server   the first action detected in the round
-//   round.result    server -> board    authoritative verdict and score
-//
-// The server closes the socket on invalid JSON or an unsupported protocol
-// version, so everything emitted here is fixed-shape.
+//   board.ready     board   -> browser  identity + capabilities
+//   instruction     browser -> board    starts one round
+//   action.detected board   -> browser  first action detected in the round
+//   round.result    browser -> board    authoritative verdict and score
 //
 
 #include <Arduino.h>

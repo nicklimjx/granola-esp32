@@ -18,7 +18,7 @@ uint32_t Game::fallbackWindowMs(uint32_t instructionIndex) {
   return cfg::kActionWindowsMs[tier];
 }
 
-void Game::begin(WsLink* link, InputManager* input, Ui* ui) {
+void Game::begin(BleLink* link, InputManager* input, Ui* ui) {
   link_ = link;
   input_ = input;
   ui_ = ui;
@@ -37,7 +37,7 @@ void Game::onInstruction(const char* roundId, Action action, uint32_t timeoutMs)
 
   windowMs_ = timeoutMs;
   if (windowMs_ == 0) {
-    // The server owns the timeout ramp. Falling back keeps the board playable
+    // The browser owns the timeout ramp. Falling back keeps the board playable
     // rather than leaving a window that never closes.
     windowMs_ = fallbackWindowMs(instructionIndex_);
     log_w("instruction %s had no timeoutMs, falling back to %u ms", roundId, windowMs_);
@@ -61,7 +61,7 @@ void Game::onInstruction(const char* roundId, Action action, uint32_t timeoutMs)
 
 void Game::onRoundResult(const char* roundId, RoundOutcome outcome, int32_t score) {
   if (roundId == nullptr || strcmp(roundId, roundId_) != 0) {
-    // Mirrors the server's own rule about unknown or completed round IDs.
+    // Mirrors the browser's rule about unknown or completed round IDs.
     log_w("ignoring round.result for round %s, current round is %s",
           roundId == nullptr ? "(null)" : roundId, roundId_);
     return;
@@ -77,9 +77,8 @@ void Game::onRoundResult(const char* roundId, RoundOutcome outcome, int32_t scor
 
 void Game::onConnectionChange(bool connected) {
   if (!connected) {
-    // The protocol says a disconnected board loses its active round and starts
-    // idle after reconnecting, so there is nothing to preserve. The score is
-    // kept on screen until the server sends a fresh one.
+    score_ = 0;
+    instructionIndex_ = 0;
     enterIdle();
   } else {
     renderIdle();
@@ -94,7 +93,7 @@ void Game::loop() {
       InputEvent event;
       if (input_->pop(event)) {
         // flush() dropped everything queued before the window opened, so this is
-        // the first action of the round — the only one that counts.
+        // the first action of the round - the only one that counts.
         const uint32_t elapsedMs = event.timestampMs - instructionRxMs_;
         log_i("round %s: detected %s after %u ms", roundId_, actionToWire(event.action), elapsedMs);
         link_->sendActionDetected(roundId_, event.action, elapsedMs);
@@ -103,7 +102,7 @@ void Game::loop() {
       }
 
       if (now - instructionRxMs_ >= windowMs_) {
-        // Nothing to send: the server runs its own timeout and will tell us.
+        // Nothing to send: the browser runs its watchdog and will tell us.
         log_i("round %s: window closed with no action", roundId_);
         ui_->showPending("TIME");
         closeWindow();
