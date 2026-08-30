@@ -75,6 +75,16 @@ void Game::onRoundResult(const char* roundId, RoundOutcome outcome, int32_t scor
   phaseStartMs_ = millis();
 }
 
+void Game::stop(bool reset) {
+  log_i("game stopped by browser%s", reset ? " with reset" : "");
+  if (reset) {
+    score_ = 0;
+    instructionIndex_ = 0;
+  }
+  input_->flush();
+  enterIdle();
+}
+
 void Game::onConnectionChange(bool connected) {
   if (!connected) {
     score_ = 0;

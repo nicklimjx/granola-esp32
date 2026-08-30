@@ -21,10 +21,12 @@ class BleLink {
   using ConnectionHandler = std::function<void(bool)>;
   using InstructionHandler = std::function<void(const char*, Action, uint32_t)>;
   using RoundResultHandler = std::function<void(const char*, RoundOutcome, int32_t)>;
+  using StopHandler = std::function<void(bool)>;
 
   void onConnection(ConnectionHandler handler) { connectionHandler_ = std::move(handler); }
   void onInstruction(InstructionHandler handler) { instructionHandler_ = std::move(handler); }
   void onRoundResult(RoundResultHandler handler) { roundResultHandler_ = std::move(handler); }
+  void onStop(StopHandler handler) { stopHandler_ = std::move(handler); }
 
   void begin(const Config& config);
   void loop();
@@ -86,4 +88,5 @@ class BleLink {
   ConnectionHandler connectionHandler_;
   InstructionHandler instructionHandler_;
   RoundResultHandler roundResultHandler_;
+  StopHandler stopHandler_;
 };

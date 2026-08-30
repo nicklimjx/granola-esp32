@@ -28,8 +28,9 @@ constexpr const char* kWireTwist = "twist";
 constexpr const char* kWireSwipe = "swipe";
 constexpr const char* kWirePress = "press";
 
-// Everything this board can detect, in advertisement order.
-constexpr Action kSupportedActions[] = {Action::Bop, Action::Twist, Action::Swipe, Action::Press};
+// Actions currently advertised to the browser, in selection order. The Twist
+// enum and detector remain, but inbound parsing rejects it while unadvertised.
+constexpr Action kSupportedActions[] = {Action::Bop, Action::Swipe, Action::Press};
 constexpr size_t kSupportedActionCount = sizeof(kSupportedActions) / sizeof(kSupportedActions[0]);
 
 const char* actionToWire(Action action);

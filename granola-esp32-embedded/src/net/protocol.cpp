@@ -51,6 +51,12 @@ bool parseInbound(const uint8_t* payload, size_t length, Inbound& out) {
     return true;
   }
 
+  if (strcmp(type, "game.stop") == 0) {
+    out.type = InboundType::GameStop;
+    out.reset = doc["reset"].as<bool>();
+    return true;
+  }
+
   if (strcmp(type, "round.result") == 0) {
     if (!copyRoundId(doc["roundId"], out.roundId, sizeof(out.roundId))) {
       log_w("round.result has a missing or oversized roundId");

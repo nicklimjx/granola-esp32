@@ -22,14 +22,14 @@
     .playing .status { background: #295f4e; color: #9df1d2; }
     .disconnected { opacity: .55; }
     .instruction { margin: 1.4rem 0 0; font-size: 1.55rem; font-weight: 800; text-transform: uppercase; }
-    .score { position: absolute; right: 1.25rem; bottom: 1rem; color: #aeb5c4; }
+    .score { margin-top: 1.25rem; color: #aeb5c4; text-transform: capitalize; }
     #empty { color: #aeb5c4; text-align: center; padding: 15vh 1rem; }
   </style>
 </head>
 <body>
   <header>
     <div><h1>Granola Lobby</h1><div id="summary">Connect a board over Bluetooth</div></div>
-    <div class="controls"><button id="connect">Connect board</button><button id="start" disabled>Start game</button></div>
+    <div class="controls"><button id="connect">Connect board</button><button id="start" disabled>Start game</button><button id="stop" disabled>Stop</button><button id="restart" disabled>Restart</button></div>
   </header>
   <main><div id="boards"></div><div id="empty">No board connected</div></main>
   <script type="module" src="/app.js"></script>

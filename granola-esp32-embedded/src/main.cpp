@@ -32,6 +32,7 @@ void setup() {
   bleLink.onRoundResult([](const char* roundId, RoundOutcome outcome, int32_t score) {
     game.onRoundResult(roundId, outcome, score);
   });
+  bleLink.onStop([](bool reset) { game.stop(reset); });
   game.begin(&bleLink, &input, &ui);
 
   BleLink::Config config;

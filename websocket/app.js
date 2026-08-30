@@ -11,6 +11,8 @@ const empty = document.querySelector("#empty");
 const summary = document.querySelector("#summary");
 const connect = document.querySelector("#connect");
 const start = document.querySelector("#start");
+const stop = document.querySelector("#stop");
+const restart = document.querySelector("#restart");
 let decoder = new TextDecoder();
 const encoder = new TextEncoder();
 const game = new Game();
@@ -19,6 +21,7 @@ let rx;
 let incoming = "";
 let writes = Promise.resolve();
 let generation = 0;
+let gameGeneration = 0;
 let connecting = false;
 const timers = new Set();
 
@@ -37,15 +40,20 @@ function render() {
     instruction.textContent = board.instruction?.action || (board.status === "complete" ? "Finished" : "Ready");
     const score = document.createElement("div");
     score.className = "score";
-    score.textContent = `Score ${board.score}`;
+    const reaction = board.elapsedMs === undefined ? "" : ` in ${board.elapsedMs} ms`;
+    const result = board.lastVerdict ? ` · ${board.lastVerdict.replace("_", " ")}${reaction}` : "";
+    score.textContent = `Score ${board.score}${result}`;
     tile.append(title, status, instruction, score);
     return tile;
   }));
   empty.hidden = state.boards.length > 0;
   connect.textContent = device?.gatt?.connected ? "Board connected" : connecting ? "Connecting..." : "Connect board";
   connect.disabled = !bluetoothSupported || connecting || Boolean(device?.gatt?.connected);
-  start.disabled = state.started || state.boards.length === 0 || !device?.gatt?.connected;
+  const boardStatus = state.boards[0]?.status;
+  start.disabled = state.started || state.boards.length === 0 || !device?.gatt?.connected || boardStatus === "stopped" || boardStatus === "complete";
   start.textContent = state.started ? "Game started" : "Start game";
+  stop.disabled = !state.started || !device?.gatt?.connected;
+  restart.disabled = !device?.gatt?.connected || (boardStatus !== "stopped" && boardStatus !== "complete");
   summary.textContent = !bluetoothSupported
     ? "Web Bluetooth requires Chromium on localhost"
     : state.boards.length
@@ -64,8 +72,15 @@ function invalidateTransport() {
   return generation;
 }
 
+function invalidateGameEffects() {
+  gameGeneration += 1;
+  for (const timer of timers) clearTimeout(timer);
+  timers.clear();
+}
+
 function run(effects) {
   const effectGeneration = generation;
+  const effectGameGeneration = gameGeneration;
   let precedingWrite = Promise.resolve();
   for (const effect of effects) {
     if (effect.type === "send") {
@@ -77,10 +92,10 @@ function run(effects) {
       });
     } else {
       precedingWrite.then(() => {
-        if (effectGeneration !== generation) return;
+        if (effectGeneration !== generation || effectGameGeneration !== gameGeneration) return;
         const timer = setTimeout(() => {
           timers.delete(timer);
-          if (effectGeneration !== generation) return;
+          if (effectGeneration !== generation || effectGameGeneration !== gameGeneration) return;
           const next = effect.event === "watchdog"
             ? game.watchdog(effect.roundId)
             : game.advance(effect.roundId);
@@ -97,12 +112,16 @@ function run(effects) {
 function queueWrite(message) {
   const characteristic = rx;
   const writeGeneration = generation;
+  const writeGameGeneration = gameGeneration;
+  const isControl = message.type === "game.stop";
   const bytes = encoder.encode(`${JSON.stringify(message)}\n`);
   const operation = writes.then(async () => {
     if (!characteristic || writeGeneration !== generation) throw new Error("stale Bluetooth write");
+    if (!isControl && writeGameGeneration !== gameGeneration) return;
+    // Once a newline-framed message starts, finish every chunk so the board
+    // never receives a partial frame. Generation checks belong before byte 0.
     for (let offset = 0; offset < bytes.length; offset += CHUNK_BYTES) {
       await characteristic.writeValueWithResponse(bytes.slice(offset, offset + CHUNK_BYTES));
-      if (writeGeneration !== generation) throw new Error("stale Bluetooth write");
     }
   });
   writes = operation.catch(() => {});
@@ -169,5 +188,13 @@ connect.addEventListener("click", async () => {
 });
 
 start.addEventListener("click", () => run(game.start()));
+stop.addEventListener("click", () => {
+  invalidateGameEffects();
+  run(game.stop());
+});
+restart.addEventListener("click", () => {
+  invalidateGameEffects();
+  run(game.restart());
+});
 
 render();

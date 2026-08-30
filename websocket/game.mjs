@@ -1,4 +1,4 @@
-export const ACTION_WINDOWS_MS = Object.freeze([2000, 1700, 1400, 1200, 1000, 800]);
+export const ACTION_WINDOWS_MS = Object.freeze([4000, 3400, 2800, 2400, 2000, 1600]);
 export const STEPS_PER_TIER = 10;
 export const TOTAL_STEPS = ACTION_WINDOWS_MS.length * STEPS_PER_TIER;
 export const WATCHDOG_GRACE_MS = 250;
@@ -13,6 +13,9 @@ export class Game {
     this.score = 0;
     this.active = null;
     this.status = "disconnected";
+    this.lastVerdict = null;
+    this.lastElapsedMs = undefined;
+    this.runId = 0;
   }
 
   acceptReady(message) {
@@ -36,12 +39,39 @@ export class Game {
     this.score = 0;
     this.active = null;
     this.status = "disconnected";
+    this.lastVerdict = null;
+    this.lastElapsedMs = undefined;
+    this.runId += 1;
   }
 
   start() {
-    if (!this.board || this.started) return [];
+    if (!this.board || this.started || this.status === "stopped" || this.status === "complete") return [];
     this.started = true;
+    this.runId += 1;
     return this.#nextInstruction();
+  }
+
+  stop() {
+    if (!this.board || !this.started) return [];
+    this.started = false;
+    this.active = null;
+    this.status = "stopped";
+    return [{ type: "send", message: { type: "game.stop", reset: false } }];
+  }
+
+  restart() {
+    if (!this.board || (this.status !== "stopped" && this.status !== "complete")) return [];
+    this.started = true;
+    this.step = 0;
+    this.score = 0;
+    this.active = null;
+    this.lastVerdict = null;
+    this.lastElapsedMs = undefined;
+    this.runId += 1;
+    return [
+      { type: "send", message: { type: "game.stop", reset: true } },
+      ...this.#nextInstruction(),
+    ];
   }
 
   actionDetected(message) {
@@ -52,7 +82,7 @@ export class Game {
     let result = "success";
     if (message.elapsedMs > this.active.timeoutMs) result = "timeout";
     else if (message.action !== this.active.action) result = "wrong_action";
-    return this.#finish(result);
+    return this.#finish(result, message.elapsedMs);
   }
 
   watchdog(roundId) {
@@ -61,7 +91,7 @@ export class Game {
   }
 
   advance(roundId) {
-    if (this.active || String(this.step) !== roundId || this.step >= TOTAL_STEPS) return [];
+    if (this.active || !this.started || `${this.runId}:${this.step}` !== roundId || this.step >= TOTAL_STEPS) return [];
     return this.#nextInstruction();
   }
 
@@ -73,6 +103,8 @@ export class Game {
         boardId: this.board.boardId,
         status: this.status,
         score: this.score,
+        lastVerdict: this.lastVerdict ?? undefined,
+        elapsedMs: this.lastElapsedMs,
         instruction: this.active ? { ...this.active } : undefined,
       }],
     };
@@ -80,6 +112,7 @@ export class Game {
 
   #nextInstruction() {
     if (this.step >= TOTAL_STEPS) {
+      this.started = false;
       this.status = "complete";
       return [];
     }
@@ -88,7 +121,7 @@ export class Game {
     const index = Math.min(actions.length - 1, Math.floor(this.random() * actions.length));
     const instruction = {
       type: "instruction",
-      roundId: String(this.step),
+      roundId: `${this.runId}:${this.step}`,
       action: actions[index],
       timeoutMs: ACTION_WINDOWS_MS[Math.floor((this.step - 1) / STEPS_PER_TIER)],
     };
@@ -101,11 +134,18 @@ export class Game {
     ];
   }
 
-  #finish(result) {
+  #finish(result, elapsedMs) {
     const roundId = this.active.roundId;
     this.active = null;
+    this.lastVerdict = result;
+    this.lastElapsedMs = elapsedMs;
     if (result === "success") this.score += 1;
-    this.status = this.step === TOTAL_STEPS ? "complete" : "feedback";
+    if (this.step === TOTAL_STEPS) {
+      this.started = false;
+      this.status = "complete";
+    } else {
+      this.status = "feedback";
+    }
     return [
       { type: "send", message: { type: "round.result", roundId, result, score: this.score } },
       ...(this.step < TOTAL_STEPS

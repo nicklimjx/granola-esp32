@@ -4,7 +4,7 @@
 //
 // Touch handling recognises two gestures from the same finger-down: a swipe
 // fires the moment the travel threshold is crossed (waiting for release would
-// cost 100+ ms of a 800 ms window), and a tap fires on release if the finger
+// cost 100+ ms of a 1600 ms window), and a tap fires on release if the finger
 // never travelled far. A gesture that has already produced a swipe is marked
 // spent so its release cannot also produce a tap.
 //

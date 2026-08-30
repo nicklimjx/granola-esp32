@@ -34,15 +34,21 @@ split into sequential chunks of at most 20 bytes. Subscribing to TX requests a
 - `action.detected`: board to browser
 - `instruction`: browser to board
 - `round.result`: browser to board
+- `game.stop`: browser to board
 
-Protocol version remains 1 and the JSON shapes are unchanged. The browser only
-chooses actions from `board.ready.supportedActions`.
+Protocol version remains 1. The browser only chooses actions from
+`board.ready.supportedActions`; current firmware advertises tap, swipe, and
+press while Twist remains implemented but temporarily unavailable.
 
 ## Game rules
 
 The browser starts one board for exactly 60 sequentially numbered steps. It
-randomly chooses an advertised action. Groups of ten use 2000, 1700, 1400,
-1200, 1000, then 800 ms windows. A correct in-window action increments score;
-a wrong action or late/no action does not. The no-response watchdog adds 250 ms
-transport grace, and each result remains visible for 350 ms before the next
-instruction. The final result ends the game.
+randomly chooses an advertised action. Groups of ten use 4000, 3400, 2800,
+2400, 2000, then 1600 ms windows. A correct in-window action increments score;
+a wrong action or late/no action does not. The dashboard shows the last verdict
+and reaction time when the board reported one. The no-response watchdog adds
+250 ms transport grace, and each result remains visible for 350 ms before the
+next instruction. Stop sends `game.stop` with `reset:false` and preserves the
+displayed score. Restart serializes `game.stop` with `reset:true` before the
+first instruction, resetting browser and firmware score/tier state for a fresh
+60-step run; it is also available after completion.

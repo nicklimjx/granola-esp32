@@ -10,7 +10,7 @@ WebSocket server.
 | Prompt | Wire name | Detected by |
 | --- | --- | --- |
 | Bop it | `tap` | screen tap |
-| Twist it | `twist` | QMI8658 gyroscope |
+| Twist it | `twist` | QMI8658 gyroscope (implemented, temporarily unadvertised) |
 | Swipe it | `swipe` | screen swipe |
 | Press it | `press` | BOOT side button (GPIO0) |
 
@@ -33,6 +33,8 @@ the pioarduino toolchain described in `platformio.ini`.
 
 The board is a Nordic UART BLE GATT server. JSON semantics remain protocol v1;
 objects are newline-framed and transported in conservative 20-byte chunks.
+The browser sends `game.stop` with `reset:false` to preserve score or
+`reset:true` before restart to clear score and fallback-tier progress.
 See [`docs/PROTOCOL.md`](docs/PROTOCOL.md).
 
 ```

@@ -220,6 +220,8 @@ void BleLink::handleLine(const uint8_t* data, size_t length) {
     }
   } else if (message.type == protocol::InboundType::RoundResult && roundResultHandler_) {
     roundResultHandler_(message.roundId, message.outcome, message.score);
+  } else if (message.type == protocol::InboundType::GameStop && stopHandler_) {
+    stopHandler_(message.reset);
   }
 }
 

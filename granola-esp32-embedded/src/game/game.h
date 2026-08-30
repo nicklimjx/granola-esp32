@@ -41,10 +41,11 @@ class Game {
   // Wired to BleLink; handlers run from BleLink::loop(), never BLE callbacks.
   void onInstruction(const char* roundId, Action action, uint32_t timeoutMs);
   void onRoundResult(const char* roundId, RoundOutcome outcome, int32_t score);
+  void stop(bool reset);
   void onConnectionChange(bool connected);
 
-  // Fallback window used only when the browser omits timeoutMs: 2000 ms for the
-  // first 10 instructions, then one step shorter every 10, holding at 800 ms.
+  // Fallback window used only when the browser omits timeoutMs: 4000 ms for the
+  // first 10 instructions, then one step shorter every 10, holding at 1600 ms.
   // The browser normally owns this; see docs/PROTOCOL.md.
   static uint32_t fallbackWindowMs(uint32_t instructionIndex);
 

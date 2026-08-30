@@ -10,13 +10,15 @@ Chromium on http://localhost:8080
   -> user starts the 60-step game
   -> browser writes instruction and round.result to RX
   -> board notifies action.detected on TX
+  -> user may stop and restart without reconnecting
 ```
 
 ## Ownership
 
 - Go embeds and serves `dashboard.html`, `app.js`, and `game.mjs` only.
 - `game.mjs` owns deterministic transitions, score, timeout tiers, watchdog
-  grace, feedback hold, and the 60-step stop condition.
+  grace, feedback hold, stop/restart state, observable verdicts, and the
+  60-step completion condition.
 - `app.js` owns Web Bluetooth selection, GATT connection, newline framing,
   sequential 20-byte writes, timers, and tile rendering.
 - Firmware owns BLE advertising, queued callback events, framing, hardware
@@ -25,6 +27,9 @@ Chromium on http://localhost:8080
 No database, accounts, multiplayer roster, frontend framework, package
 manifest, Wi-Fi, WebSocket endpoint, or reconnect/resume game is included.
 A disconnect abandons the active board round; the page can select a board again.
+Stop/restart invalidates queued browser effects. Restart serializes a resetting
+`game.stop` before its first instruction and uses fresh opaque round IDs, so
+firmware fallback state and stale browser/board work cannot affect the new game.
 
 ## Verification
 

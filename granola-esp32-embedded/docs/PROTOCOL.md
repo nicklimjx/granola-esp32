@@ -25,7 +25,7 @@ handlers, sends indications, and restarts advertising after disconnect.
 ### `board.ready`
 
 ```json
-{"type":"board.ready","protocolVersion":1,"boardId":"bopit-01","supportedActions":["tap","twist","swipe","press"]}
+{"type":"board.ready","protocolVersion":1,"boardId":"bopit-01","supportedActions":["tap","swipe","press"]}
 ```
 
 ### `action.detected`
@@ -42,7 +42,7 @@ The first action in an active window is reported. `elapsedMs` is measured with
 ### `instruction`
 
 ```json
-{"type":"instruction","roundId":"12","action":"tap","timeoutMs":1700}
+{"type":"instruction","roundId":"1:12","action":"tap","timeoutMs":3400}
 ```
 
 The board rejects unsupported actions and unusable round IDs. A missing/zero
@@ -57,6 +57,17 @@ The board rejects unsupported actions and unusable round IDs. A missing/zero
 Results are `success`, `wrong_action`, or `timeout`. The board renders the
 browser-owned score and ignores results for a different round.
 
+### `game.stop`
+
+```json
+{"type":"game.stop","reset":false}
+```
+
+The board immediately abandons any active round and returns to its connected
+idle UI without rendering a timeout. The optional `reset` defaults to `false`,
+which preserves score and fallback-tier progress. Restart sends `reset:true`
+before its first instruction, clearing both values so that prompt shows zero.
+
 ## Round lifecycle
 
 ```text
@@ -64,10 +75,15 @@ instruction -> Awaiting -> action.detected or local window close
             -> AwaitingResult -> round.result -> Feedback (350 ms) -> Idle
 ```
 
-The browser chooses one advertised action for each of 60 steps. Ten-step tiers
-use 2000/1700/1400/1200/1000/800 ms. Its watchdog resolves no-response rounds
-after the window plus 250 ms grace, waits 350 ms after every result, and stops
-after round 60. A disconnect abandons the active round.
+The browser chooses one advertised action for each of 60 steps. Current
+firmware advertises and accepts tap, swipe, and press. The Twist enum and
+detector remain implemented, but wire parsing rejects Twist while unadvertised. Ten-step tiers use
+4000/3400/2800/2400/2000/1600 ms. Its watchdog resolves no-response rounds
+after the window plus 250 ms grace, waits 350 ms after every result, and
+completes after round 60. Stop preserves score; restart serializes a resetting
+stop before its first instruction, resets score, step, and fallback tier, uses
+fresh opaque round IDs, and invalidates stale browser timers. A disconnect
+abandons the active round.
 
 ## Browser constraint
 
