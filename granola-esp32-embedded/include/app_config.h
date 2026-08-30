@@ -16,7 +16,7 @@
 #define WIFI_PASSWORD "your-password"
 #define WS_HOST "192.168.1.50"
 #define WS_PORT 8080
-#define WS_PATH "/bopit"
+#define WS_PATH "/board"
 #endif
 
 #define FIRMWARE_VERSION "0.1.0"

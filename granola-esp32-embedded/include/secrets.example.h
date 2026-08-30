@@ -10,4 +10,4 @@
 // "laptop.local" are not resolved by this firmware.
 #define WS_HOST "192.168.1.50"
 #define WS_PORT 8080
-#define WS_PATH "/bopit"
+#define WS_PATH "/board"
