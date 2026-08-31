@@ -5,16 +5,9 @@
 #include <stdint.h>
 #include "board_config.h"
 
-#define FIRMWARE_VERSION "0.2.0"
+#define FIRMWARE_VERSION "0.3.0"
 
 namespace cfg {
-
-// Browser instructions normally carry the action window. This matching table
-// is only a firmware fallback for a missing timeoutMs.
-constexpr uint16_t kActionWindowsMs[] = {4000, 3400, 2800, 2400, 2000, 1600};
-constexpr uint32_t kRoundsPerTier = 10;
-constexpr uint32_t kFeedbackHoldMs = 350;
-constexpr uint32_t kRoundResultTimeoutMs = 5000;
 
 constexpr uint32_t kTouchPollIntervalMs = 8;
 constexpr int16_t kTapMaxTravelPx = 28;

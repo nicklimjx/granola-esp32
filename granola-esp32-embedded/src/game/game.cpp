@@ -1,22 +1,14 @@
 #include "game.h"
 
 #include <Arduino.h>
-#include <string.h>
-
-#include "../../include/app_config.h"
 
 namespace {
-constexpr uint32_t kUiTickIntervalMs = 33;  // ~30 fps countdown redraw
-constexpr size_t kWindowTiers = sizeof(cfg::kActionWindowsMs) / sizeof(cfg::kActionWindowsMs[0]);
-}  // namespace
+constexpr uint32_t kUiTickIntervalMs = 33;
 
-uint32_t Game::fallbackWindowMs(uint32_t instructionIndex) {
-  size_t tier = instructionIndex / cfg::kRoundsPerTier;
-  if (tier >= kWindowTiers) {
-    tier = kWindowTiers - 1;
-  }
-  return cfg::kActionWindowsMs[tier];
+uint16_t clampElapsed(uint32_t elapsedMs) {
+  return elapsedMs > UINT16_MAX ? UINT16_MAX : static_cast<uint16_t>(elapsedMs);
 }
+}  // namespace
 
 void Game::begin(BleLink* link, InputManager* input, Ui* ui) {
   link_ = link;
@@ -25,70 +17,60 @@ void Game::begin(BleLink* link, InputManager* input, Ui* ui) {
   enterIdle();
 }
 
-void Game::onInstruction(const char* roundId, Action action, uint32_t timeoutMs) {
-  // Stamp the clock first: the protocol defines elapsedMs from receipt of the
-  // instruction, and everything below (including a ~15 ms full repaint) happens
-  // after receipt.
+void Game::onInstruction(uint32_t session, uint8_t round, Action action, uint16_t timeoutMs) {
   const uint32_t receivedMs = millis();
-
-  if (action == Action::None || roundId == nullptr) {
+  if (action == Action::None || round < 1 || round > 60 || timeoutMs == 0) return;
+  const bool startsSession = !hasSession_ && state_ == State::Idle && round == 1;
+  const bool continuesSession = hasSession_ && state_ == State::Feedback &&
+                                session == session_ && round_ < 60 && round == round_ + 1;
+  if (!startsSession && !continuesSession) {
+    log_w("ignoring out-of-sequence instruction session %lu round %u",
+          static_cast<unsigned long>(session), round);
     return;
   }
 
-  windowMs_ = timeoutMs;
-  if (windowMs_ == 0) {
-    // The browser owns the timeout ramp. Falling back keeps the board playable
-    // rather than leaving a window that never closes.
-    windowMs_ = fallbackWindowMs(instructionIndex_);
-    log_w("instruction %s had no timeoutMs, falling back to %u ms", roundId, windowMs_);
+  if (reportPending_) {
+    log_w("superseding unsent round event for session %lu round %u",
+          static_cast<unsigned long>(session_), round_);
+    reportPending_ = false;
   }
-  ++instructionIndex_;
-
-  strncpy(roundId_, roundId, sizeof(roundId_) - 1);
-  roundId_[sizeof(roundId_) - 1] = '\0';
+  hasSession_ = true;
+  session_ = session;
+  round_ = round;
   expected_ = action;
+  windowMs_ = timeoutMs;
   instructionRxMs_ = receivedMs;
   state_ = State::Awaiting;
 
-  log_i("round %s: %s, timeout %u ms", roundId_, actionToWire(expected_), windowMs_);
-
-  ui_->showPrompt(expected_, windowMs_, score_, roundId_);
+  log_i("session %lu round %u: %s, timeout %u ms",
+        static_cast<unsigned long>(session_), round_, actionToWire(expected_), windowMs_);
+  ui_->showPrompt(expected_, windowMs_, round_);
   lastUiTickMs_ = millis();
 
-  // Anything the player did before the prompt was on screen does not count.
+  // Gestures completed before the prompt became visible cannot count.
   input_->flush();
 }
 
-void Game::onRoundResult(const char* roundId, RoundOutcome outcome, int32_t score) {
-  if (roundId == nullptr || strcmp(roundId, roundId_) != 0) {
-    // Mirrors the browser's rule about unknown or completed round IDs.
-    log_w("ignoring round.result for round %s, current round is %s",
-          roundId == nullptr ? "(null)" : roundId, roundId_);
+void Game::stop(uint32_t session, bool reset) {
+  if (!hasSession_ || session != session_) {
+    log_w("ignoring stop for stale session %lu", static_cast<unsigned long>(session));
     return;
   }
-
-  score_ = score;
-  log_i("round %s: %s, score %ld", roundId_, outcomeToWire(outcome), static_cast<long>(score_));
-
-  ui_->showResult(outcome, score_);
-  state_ = State::Feedback;
-  phaseStartMs_ = millis();
-}
-
-void Game::stop(bool reset) {
-  log_i("game stopped by browser%s", reset ? " with reset" : "");
-  if (reset) {
-    score_ = 0;
-    instructionIndex_ = 0;
-  }
+  log_i("session %lu stopped%s", static_cast<unsigned long>(session), reset ? " with reset" : "");
   input_->flush();
+  reportPending_ = false;
+  hasSession_ = false;
+  session_ = 0;
+  round_ = 0;
   enterIdle();
 }
 
 void Game::onConnectionChange(bool connected) {
   if (!connected) {
-    score_ = 0;
-    instructionIndex_ = 0;
+    hasSession_ = false;
+    session_ = 0;
+    round_ = 0;
+    reportPending_ = false;
     enterIdle();
   } else {
     renderIdle();
@@ -96,83 +78,73 @@ void Game::onConnectionChange(bool connected) {
 }
 
 void Game::loop() {
+  tryReportRound();
   const uint32_t now = millis();
 
-  switch (state_) {
-    case State::Awaiting: {
-      InputEvent event;
-      if (input_->pop(event)) {
-        // flush() dropped everything queued before the window opened, so this is
-        // the first action of the round - the only one that counts.
-        const uint32_t elapsedMs = event.timestampMs - instructionRxMs_;
-        log_i("round %s: detected %s after %u ms", roundId_, actionToWire(event.action), elapsedMs);
-        link_->sendActionDetected(roundId_, event.action, elapsedMs);
-        closeWindow();
-        return;
+  if (state_ == State::Awaiting) {
+    InputEvent event;
+    if (input_->pop(event)) {
+      const uint32_t elapsedMs = event.timestampMs - instructionRxMs_;
+      if (elapsedMs <= windowMs_) {
+        const LocalVerdict verdict = event.action == expected_
+                                         ? LocalVerdict::Success
+                                         : LocalVerdict::WrongAction;
+        finishRound(event.action, elapsedMs, verdict);
+      } else {
+        // Input can be queued before loop() runs. A timestamp after the exact
+        // deadline is still a timeout, not a late action.
+        finishRound(Action::None, elapsedMs, LocalVerdict::Timeout);
       }
-
-      if (now - instructionRxMs_ >= windowMs_) {
-        // Nothing to send: the browser runs its watchdog and will tell us.
-        log_i("round %s: window closed with no action", roundId_);
-        ui_->showPending("TIME");
-        closeWindow();
-        return;
-      }
-
-      if (now - lastUiTickMs_ >= kUiTickIntervalMs) {
-        lastUiTickMs_ = now;
-        ui_->updateCountdown(windowMs_, now - instructionRxMs_);
-      }
-      break;
+      return;
     }
 
-    case State::AwaitingResult:
-      // Don't hang if round.result never arrives; the next instruction would
-      // recover anyway, but an unresponsive screen is worse than a reset.
-      if (now - phaseStartMs_ >= cfg::kRoundResultTimeoutMs) {
-        log_w("round %s: no round.result within %u ms, going idle", roundId_,
-              cfg::kRoundResultTimeoutMs);
-        enterIdle();
-      }
-      break;
-
-    case State::Feedback:
-      // Subtraction form throughout, so millis() rollover is a non-event.
-      if (now - phaseStartMs_ >= cfg::kFeedbackHoldMs) {
-        enterIdle();
-      }
-      break;
-
-    case State::Idle:
-    default: {
-      // Drain input so a stray gesture cannot sit in the queue between rounds.
-      InputEvent discarded;
-      while (input_->pop(discarded)) {
-      }
-      break;
+    // elapsed == timeout is still live; timeout starts strictly after it.
+    if (now - instructionRxMs_ > windowMs_) {
+      finishRound(Action::None, windowMs_, LocalVerdict::Timeout);
+      return;
     }
+
+    if (now - lastUiTickMs_ >= kUiTickIntervalMs) {
+      lastUiTickMs_ = now;
+      ui_->updateCountdown(windowMs_, now - instructionRxMs_);
+    }
+    return;
+  }
+
+  // Drain stray gestures while idle or while feedback remains on screen.
+  InputEvent discarded;
+  while (input_->pop(discarded)) {
   }
 }
 
-void Game::closeWindow() {
-  state_ = State::AwaitingResult;
-  phaseStartMs_ = millis();
+void Game::finishRound(Action detected, uint32_t elapsedMs, LocalVerdict verdict) {
+  reportedAction_ = detected;
+  reportedElapsedMs_ = clampElapsed(elapsedMs);
+  reportPending_ = true;
+  state_ = State::Feedback;
+
+  log_i("session %lu round %u ended: %s after %u ms",
+        static_cast<unsigned long>(session_), round_,
+        detected == Action::None ? "timeout" : actionToWire(detected), reportedElapsedMs_);
+  ui_->showResult(verdict);
+  tryReportRound();
+}
+
+void Game::tryReportRound() {
+  if (!reportPending_ || link_ == nullptr) return;
+  if (link_->sendRoundEnded(session_, round_, reportedAction_, reportedElapsedMs_)) {
+    reportPending_ = false;
+  }
 }
 
 void Game::enterIdle() {
   state_ = State::Idle;
   expected_ = Action::None;
-  roundId_[0] = '\0';
   renderIdle();
 }
 
 void Game::renderIdle() {
-  if (ui_ == nullptr) {
-    return;
-  }
-  if (link_ != nullptr && link_->isConnected()) {
-    ui_->showWaiting(score_);
-  } else {
-    ui_->showStatus("BOP IT", "connecting...");
-  }
+  if (ui_ == nullptr) return;
+  if (link_ != nullptr && link_->isConnected()) ui_->showWaiting();
+  else ui_->showStatus("BOP IT", "connecting...");
 }

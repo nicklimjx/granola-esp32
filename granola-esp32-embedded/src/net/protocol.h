@@ -1,16 +1,6 @@
 #pragma once
-//
-// JSON codec for the board <-> browser BLE protocol.
-//
-// One newline-framed JSON object, always with a "type" field. The board sends
-// two message types and receives three:
-//
-//   board.ready     board   -> browser  identity + capabilities
-//   instruction     browser -> board    starts one round
-//   action.detected board   -> browser  first action detected in the round
-//   round.result    browser -> board    authoritative verdict and score
-//   game.stop       browser -> board    immediately abandon the active round
-//
+// Protocol v2 codec. Browser-to-board gameplay messages are exact, atomic
+// binary packets. board.ready remains newline-framed JSON for discovery.
 
 #include <Arduino.h>
 #include <stddef.h>
@@ -20,46 +10,40 @@
 
 namespace protocol {
 
-constexpr int kProtocolVersion = 1;
+constexpr int kProtocolVersion = 2;
+constexpr size_t kInstructionLength = 9;
+constexpr size_t kRoundEndedLength = 9;
+constexpr size_t kStopLength = 6;
+constexpr size_t kMaxInboundLength = kInstructionLength;
 
-// Round IDs are opaque server-side strings that the board only ever echoes.
-// Long enough for a UUID; anything longer is rejected rather than truncated,
-// because a truncated ID would be silently ignored by the server.
-constexpr size_t kRoundIdMaxLen = 40;
+constexpr uint8_t kInstructionType = 0x21;
+constexpr uint8_t kRoundEndedType = 0x22;
+constexpr uint8_t kStopType = 0x24;
 
 enum class InboundType : uint8_t {
-  Unknown,      // a type this firmware does not handle
-  Instruction,  // {"type":"instruction","roundId":"1:12","action":"tap","timeoutMs":3400}
-  RoundResult,  // {"type":"round.result","roundId":"12","result":"success","score":5}
-  GameStop,     // {"type":"game.stop","reset":true}
+  Unknown,
+  Instruction,
+  GameStop,
 };
 
 struct Inbound {
   InboundType type = InboundType::Unknown;
-  char roundId[kRoundIdMaxLen + 1] = {0};
-
-  // Instruction only.
+  uint32_t session = 0;
+  uint8_t round = 0;
   Action action = Action::None;
-  uint32_t timeoutMs = 0;
-
-  // RoundResult only.
-  RoundOutcome outcome = RoundOutcome::Unknown;
-  int32_t score = 0;
-
-  // GameStop only; omitted means false.
+  uint16_t timeoutMs = 0;
   bool reset = false;
 };
 
-// Parses one frame. Returns false if the payload is not JSON, has no "type", or
-// is a known type with an unusable payload (missing/oversized round ID). An
-// unrecognised "type" parses successfully as InboundType::Unknown.
+// Requires one complete GATT value with exactly the packet's specified length.
 bool parseInbound(const uint8_t* payload, size_t length, Inbound& out);
 
-// {"type":"board.ready","protocolVersion":1,"boardId":"bopit-01",
-//  "supportedActions":["tap","swipe","press"]}
+// Newline is appended by BleLink before chunked transmission.
 String encodeBoardReady(const char* boardId);
 
-// {"type":"action.detected","roundId":"12","action":"twist","elapsedMs":640}
-String encodeActionDetected(const char* roundId, Action action, uint32_t elapsedMs);
+// [0]=0x22, [1..4]=session LE, [5]=round, [6]=action (0 means timeout),
+// [7..8]=elapsedMs LE.
+void encodeRoundEnded(uint32_t session, uint8_t round, Action action, uint16_t elapsedMs,
+                      uint8_t out[kRoundEndedLength]);
 
 }  // namespace protocol

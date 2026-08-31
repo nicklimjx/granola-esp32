@@ -6,7 +6,7 @@ import (
 	"net/http"
 )
 
-//go:embed dashboard.html app.js game.mjs
+//go:embed dashboard.html app.js game.mjs audio
 var assets embed.FS
 
 func routes() http.Handler {
@@ -22,6 +22,7 @@ func routes() http.Handler {
 	})
 	mux.Handle("GET /app.js", http.FileServer(http.FS(assets)))
 	mux.Handle("GET /game.mjs", http.FileServer(http.FS(assets)))
+	mux.Handle("GET /audio/", http.FileServer(http.FS(assets)))
 	return mux
 }
 

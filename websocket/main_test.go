@@ -18,6 +18,7 @@ func TestServesDashboardAndJavaScript(t *testing.T) {
 		{"/", "text/html", "Connect board"},
 		{"/app.js", "text/javascript", "navigator.bluetooth"},
 		{"/game.mjs", "text/javascript", "export class Game"},
+		{"/audio/README.md", "text/plain", "Prompt recordings"},
 	} {
 		response, err := http.Get(server.URL + test.path)
 		if err != nil {

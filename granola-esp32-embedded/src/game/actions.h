@@ -2,11 +2,8 @@
 //
 // The four bop-it actions and their wire names.
 //
-// The server protocol treats an action as an open string, not an enum: the
-// board advertises what it can detect in board.ready.supportedActions and the
-// server may only ask for those values. The constants below are therefore the
-// authoritative list — change them here and the advertisement, the outbound
-// action.detected messages and the parser all follow.
+// The board advertises wire names in board.ready and protocol v2 maps those
+// actions to fixed byte codes for gameplay packets.
 //
 
 #include <stddef.h>
@@ -35,18 +32,14 @@ constexpr size_t kSupportedActionCount = sizeof(kSupportedActions) / sizeof(kSup
 
 const char* actionToWire(Action action);
 Action actionFromWire(const char* wire);
+uint8_t actionToCode(Action action);
+Action actionFromCode(uint8_t code);
 
 // Human-readable prompt shown on the board, e.g. "TWIST IT!".
 const char* actionToPrompt(Action action);
 
-// The authoritative per-round verdict, which the server owns and sends in
-// round.result.
-enum class RoundOutcome : uint8_t {
-  Unknown = 0,
+enum class LocalVerdict : uint8_t {
   Success,
   WrongAction,
   Timeout,
 };
-
-RoundOutcome outcomeFromWire(const char* wire);
-const char* outcomeToWire(RoundOutcome outcome);

@@ -3,8 +3,14 @@ import { Game } from "./game.mjs";
 const SERVICE_UUID = "6e400001-b5a3-f393-e0a9-e50e24dcca9e";
 const RX_UUID = "6e400002-b5a3-f393-e0a9-e50e24dcca9e";
 const TX_UUID = "6e400003-b5a3-f393-e0a9-e50e24dcca9e";
-const CHUNK_BYTES = 20;
+const INSTRUCTION_TYPE = 0x21;
+const ROUND_ENDED_TYPE = 0x22;
+const STOP_TYPE = 0x24;
 const bluetoothSupported = "bluetooth" in navigator;
+const promptSounds = Object.fromEntries(
+  ["tap", "swipe", "press"].map(action => [action, new Audio(`/audio/${action}.mp3`)]),
+);
+let playingSound;
 
 const boards = document.querySelector("#boards");
 const empty = document.querySelector("#empty");
@@ -14,7 +20,6 @@ const start = document.querySelector("#start");
 const stop = document.querySelector("#stop");
 const restart = document.querySelector("#restart");
 let decoder = new TextDecoder();
-const encoder = new TextEncoder();
 const game = new Game();
 let device;
 let rx;
@@ -61,6 +66,22 @@ function render() {
       : "Connect a board over Bluetooth";
 }
 
+function stopPromptSound() {
+  if (!playingSound) return;
+  playingSound.pause();
+  playingSound.currentTime = 0;
+  playingSound = undefined;
+}
+
+function playPromptSound(action) {
+  stopPromptSound();
+  const sound = promptSounds[action];
+  if (!sound) return;
+  sound.currentTime = 0;
+  playingSound = sound;
+  sound.play().catch(error => console.warn(`Could not play ${action} prompt`, error));
+}
+
 function invalidateTransport() {
   generation += 1;
   for (const timer of timers) clearTimeout(timer);
@@ -78,6 +99,22 @@ function invalidateGameEffects() {
   timers.clear();
 }
 
+function failTransport(error, failedGeneration, label = "Bluetooth write failed") {
+  if (failedGeneration !== generation) return;
+  const failedDevice = device;
+  invalidateTransport();
+  stopPromptSound();
+  game.disconnect();
+  device = undefined;
+  connecting = false;
+  if (failedDevice?.gatt?.connected) {
+    try { failedDevice.gatt.disconnect(); } catch (disconnectError) { console.warn(disconnectError); }
+  }
+  render();
+  console.error(error);
+  summary.textContent = `${label}: ${error.message}`;
+}
+
 function run(effects) {
   const effectGeneration = generation;
   const effectGameGeneration = gameGeneration;
@@ -85,20 +122,24 @@ function run(effects) {
   for (const effect of effects) {
     if (effect.type === "send") {
       precedingWrite = queueWrite(effect.message);
-      precedingWrite.catch(error => {
-        if (effectGeneration !== generation) return;
-        console.error(error);
-        summary.textContent = `Bluetooth write failed: ${error.message}`;
-      });
-    } else {
+      if (effect.message.type === "instruction") {
+        precedingWrite.then(() => {
+          if (effectGeneration !== generation || effectGameGeneration !== gameGeneration) return;
+          playPromptSound(effect.message.action);
+        }).catch(() => {});
+      }
+      precedingWrite.catch(error => failTransport(error, effectGeneration));
+    } else if (effect.type === "audio.stop") {
+      if (effectGeneration === generation && effectGameGeneration === gameGeneration) stopPromptSound();
+    } else if (effect.type === "schedule") {
       precedingWrite.then(() => {
         if (effectGeneration !== generation || effectGameGeneration !== gameGeneration) return;
         const timer = setTimeout(() => {
           timers.delete(timer);
           if (effectGeneration !== generation || effectGameGeneration !== gameGeneration) return;
           const next = effect.event === "watchdog"
-            ? game.watchdog(effect.roundId)
-            : game.advance(effect.roundId);
+            ? game.watchdog(effect.session, effect.round)
+            : game.advance(effect.session, effect.round);
           run(next);
           render();
         }, effect.delayMs);
@@ -109,20 +150,33 @@ function run(effects) {
   render();
 }
 
+function encodeGameplayPacket(message) {
+  const length = message.type === "instruction" ? 9 : message.type === "game.stop" ? 6 : 0;
+  if (!length) throw new Error(`unsupported gameplay message: ${message.type}`);
+  const bytes = new Uint8Array(length);
+  const view = new DataView(bytes.buffer);
+  bytes[0] = message.type === "instruction" ? INSTRUCTION_TYPE : STOP_TYPE;
+  view.setUint32(1, message.session, true);
+  if (message.type === "instruction") {
+    bytes[5] = message.round;
+    bytes[6] = message.actionCode;
+    view.setUint16(7, message.timeoutMs, true);
+  } else {
+    bytes[5] = message.reset ? 1 : 0;
+  }
+  return bytes;
+}
+
 function queueWrite(message) {
   const characteristic = rx;
   const writeGeneration = generation;
   const writeGameGeneration = gameGeneration;
   const isControl = message.type === "game.stop";
-  const bytes = encoder.encode(`${JSON.stringify(message)}\n`);
+  const bytes = encodeGameplayPacket(message);
   const operation = writes.then(async () => {
     if (!characteristic || writeGeneration !== generation) throw new Error("stale Bluetooth write");
     if (!isControl && writeGameGeneration !== gameGeneration) return;
-    // Once a newline-framed message starts, finish every chunk so the board
-    // never receives a partial frame. Generation checks belong before byte 0.
-    for (let offset = 0; offset < bytes.length; offset += CHUNK_BYTES) {
-      await characteristic.writeValueWithResponse(bytes.slice(offset, offset + CHUNK_BYTES));
-    }
+    await characteristic.writeValueWithResponse(bytes);
   });
   writes = operation.catch(() => {});
   return operation;
@@ -130,6 +184,17 @@ function queueWrite(message) {
 
 function receive(value, receiveGeneration) {
   if (receiveGeneration !== generation) return;
+  if (value.byteLength === 9 && value.getUint8(0) === ROUND_ENDED_TYPE) {
+    run(game.roundEnded({
+      type: "round.ended",
+      session: value.getUint32(1, true),
+      round: value.getUint8(5),
+      actionCode: value.getUint8(6),
+      elapsedMs: value.getUint16(7, true),
+    }));
+    render();
+    return;
+  }
   incoming += decoder.decode(value, { stream: true });
   for (;;) {
     const newline = incoming.indexOf("\n");
@@ -140,7 +205,6 @@ function receive(value, receiveGeneration) {
     try {
       const message = JSON.parse(line);
       if (message.type === "board.ready") game.acceptReady(message);
-      else if (message.type === "action.detected") run(game.actionDetected(message));
       render();
     } catch (error) {
       console.error("Invalid board message", error, line);
@@ -160,11 +224,7 @@ connect.addEventListener("click", async () => {
     device = selectedDevice;
     selectedDevice.addEventListener("gattserverdisconnected", () => {
       if (device !== selectedDevice) return;
-      device = undefined;
-      connecting = false;
-      invalidateTransport();
-      game.disconnect();
-      render();
+      failTransport(new Error("board disconnected"), attemptGeneration, "Bluetooth disconnected");
     });
     const server = await selectedDevice.gatt.connect();
     const service = await server.getPrimaryService(SERVICE_UUID);
@@ -176,20 +236,14 @@ connect.addEventListener("click", async () => {
     connecting = false;
     render();
   } catch (error) {
-    if (attemptGeneration !== generation) return;
-    console.error(error);
-    invalidateTransport();
-    game.disconnect();
-    device = undefined;
-    connecting = false;
-    render();
-    summary.textContent = `Bluetooth connection failed: ${error.message}`;
+    failTransport(error, attemptGeneration, "Bluetooth connection failed");
   }
 });
 
 start.addEventListener("click", () => run(game.start()));
 stop.addEventListener("click", () => {
   invalidateGameEffects();
+  stopPromptSound();
   run(game.stop());
 });
 restart.addEventListener("click", () => {

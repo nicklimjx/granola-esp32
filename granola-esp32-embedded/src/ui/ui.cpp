@@ -15,9 +15,20 @@ constexpr int16_t kBarW = LCD_WIDTH - (2 * kBarX);
 constexpr int16_t kBarH = 26;
 constexpr int16_t kBarY = 330;
 
-constexpr int16_t kScoreY = 48;
 constexpr int16_t kPromptY = 190;
 constexpr int16_t kFooterY = 400;
+
+// Every post-boot screen only draws inside these three regions. Clearing them
+// instead of all 164,864 panel pixels keeps state transitions from monopolising
+// the loop that also polls input and pumps BLE.
+constexpr int16_t kMainClearY = 176;
+constexpr int16_t kMainClearH = 96;
+constexpr int16_t kBarClearX = kBarX - 4;
+constexpr int16_t kBarClearY = kBarY - 4;
+constexpr int16_t kBarClearW = kBarW + 8;
+constexpr int16_t kBarClearH = kBarH + 8;
+constexpr int16_t kFooterClearY = kFooterY - 4;
+constexpr int16_t kFooterClearH = 24;
 
 constexpr uint16_t kColorBg = RGB565(0, 0, 0);
 constexpr uint16_t kColorText = RGB565(248, 252, 248);
@@ -62,18 +73,18 @@ void Ui::drawCentered(const char* text, int16_t y, uint8_t size, uint16_t color)
   gfx_->print(text);
 }
 
-void Ui::drawScore(int32_t score) {
-  char buf[24];
-  snprintf(buf, sizeof(buf), "SCORE %ld", static_cast<long>(score));
-  drawCentered(buf, kScoreY, 3, kColorAccent);
+void Ui::drawRound(uint8_t round) {
+  char buf[16];
+  snprintf(buf, sizeof(buf), "round %u", round);
+  drawCentered(buf, kFooterY, 2, kColorDim);
 }
 
-void Ui::drawRoundId(const char* roundId) {
-  // Round IDs are opaque server strings and may be long; the board only shows
-  // them as a debugging aid, so a truncated tail is fine here.
-  char buf[20];
-  snprintf(buf, sizeof(buf), "round %.12s", roundId);
-  drawCentered(buf, kFooterY, 2, kColorDim);
+void Ui::clearDynamicRegions() {
+  gfx_->fillRect(0, kMainClearY, LCD_WIDTH, kMainClearH, kColorBg);
+  gfx_->fillRect(kBarClearX, kBarClearY, kBarClearW, kBarClearH, kColorBg);
+  gfx_->fillRect(0, kFooterClearY, LCD_WIDTH, kFooterClearH, kColorBg);
+  lastBarWidth_ = -1;
+  hasBarColor_ = false;
 }
 
 void Ui::drawBar(uint32_t windowMs, uint32_t elapsedMs) {
@@ -83,51 +94,46 @@ void Ui::drawBar(uint32_t windowMs, uint32_t elapsedMs) {
   const uint32_t remaining = elapsedMs >= windowMs ? 0 : windowMs - elapsedMs;
   const float fraction = static_cast<float>(remaining) / static_cast<float>(windowMs);
   const int16_t width = static_cast<int16_t>(fraction * kBarW);
+  const uint16_t color = fraction > 0.5f ? kColorGood : (fraction > 0.25f ? kColorWarn : kColorBad);
 
-  if (width == lastBarWidth_) {
-    return;
-  }
+  if (width == lastBarWidth_ && hasBarColor_ && color == lastBarColor_) return;
 
-  // Only clear the sliver that just disappeared, so the bar never flickers.
   if (lastBarWidth_ > width) {
     gfx_->fillRect(kBarX + width, kBarY, lastBarWidth_ - width, kBarH, kColorBg);
   }
-  const uint16_t color = fraction > 0.5f ? kColorGood : (fraction > 0.25f ? kColorWarn : kColorBad);
-  gfx_->fillRect(kBarX, kBarY, width, kBarH, color);
+  if (!hasBarColor_ || color != lastBarColor_) {
+    // A band transition recolors the remaining bar once. Ordinary countdown
+    // ticks only clear the disappeared sliver above.
+    gfx_->fillRect(kBarX, kBarY, width, kBarH, color);
+  } else if (width > lastBarWidth_) {
+    // Defensive support for a reset/increased window without a full repaint.
+    gfx_->fillRect(kBarX + lastBarWidth_, kBarY, width - lastBarWidth_, kBarH, color);
+  }
   lastBarWidth_ = width;
+  lastBarColor_ = color;
+  hasBarColor_ = true;
 }
 
 void Ui::showStatus(const char* title, const char* subtitle) {
-  if (!isReady()) {
-    return;
-  }
-  gfx_->fillScreen(kColorBg);
-  lastBarWidth_ = -1;
+  if (!isReady()) return;
+  clearDynamicRegions();
   drawCentered(title, kPromptY, 4, kColorAccent);
   drawCentered(subtitle, kPromptY + 60, 2, kColorDim);
 }
 
-void Ui::showWaiting(int32_t score) {
-  if (!isReady()) {
-    return;
-  }
-  gfx_->fillScreen(kColorBg);
-  lastBarWidth_ = -1;
-  drawScore(score);
+void Ui::showWaiting() {
+  if (!isReady()) return;
+  clearDynamicRegions();
   drawCentered("GET READY", kPromptY, 4, kColorAccent);
 }
 
-void Ui::showPrompt(Action expected, uint32_t windowMs, int32_t score, const char* roundId) {
-  if (!isReady()) {
-    return;
-  }
-  gfx_->fillScreen(kColorBg);
-  lastBarWidth_ = -1;
-  drawScore(score);
+void Ui::showPrompt(Action expected, uint32_t windowMs, uint8_t round) {
+  if (!isReady()) return;
+  clearDynamicRegions();
   drawCentered(actionToPrompt(expected), kPromptY, 4, kColorText);
   gfx_->drawRect(kBarX - 2, kBarY - 2, kBarW + 4, kBarH + 4, kColorDim);
   drawBar(windowMs, 0);
-  drawRoundId(roundId);
+  drawRound(round);
 }
 
 void Ui::updateCountdown(uint32_t windowMs, uint32_t elapsedMs) {
@@ -137,42 +143,30 @@ void Ui::updateCountdown(uint32_t windowMs, uint32_t elapsedMs) {
   drawBar(windowMs, elapsedMs);
 }
 
-void Ui::showPending(const char* note) {
-  if (!isReady()) {
-    return;
-  }
-  gfx_->fillRect(kBarX, kBarY, kBarW, kBarH, kColorBg);
-  lastBarWidth_ = -1;
-  drawCentered(note, kBarY + 5, 2, kColorDim);
-}
-
-void Ui::showResult(RoundOutcome outcome, int32_t score) {
+void Ui::showResult(LocalVerdict verdict) {
   if (!isReady()) {
     return;
   }
 
   const char* headline = "?";
   uint16_t color = kColorDim;
-  switch (outcome) {
-    case RoundOutcome::Success:
+  switch (verdict) {
+    case LocalVerdict::Success:
       headline = "NICE";
       color = kColorGood;
       break;
-    case RoundOutcome::WrongAction:
+    case LocalVerdict::WrongAction:
       headline = "WRONG";
       color = kColorWarn;
       break;
-    case RoundOutcome::Timeout:
+    case LocalVerdict::Timeout:
       headline = "TOO SLOW";
       color = kColorBad;
       break;
-    case RoundOutcome::Unknown:
     default:
       break;
   }
 
-  gfx_->fillScreen(kColorBg);
-  lastBarWidth_ = -1;
-  drawScore(score);
+  clearDynamicRegions();
   drawCentered(headline, kPromptY - 10, 5, color);
 }

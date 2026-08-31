@@ -8,8 +8,8 @@ Chromium on http://localhost:8080
   -> browser selects Nordic UART BLE service
   -> TX read yields newline-framed board.ready
   -> user starts the 60-step game
-  -> browser writes instruction and round.result to RX
-  -> board notifies action.detected on TX
+  -> browser writes one 9-byte instruction to RX
+  -> board indicates one 9-byte round-ended event on TX
   -> user may stop and restart without reconnecting
 ```
 
@@ -19,21 +19,22 @@ Chromium on http://localhost:8080
 - `game.mjs` owns deterministic transitions, score, timeout tiers, watchdog
   grace, feedback hold, stop/restart state, observable verdicts, and the
   60-step completion condition.
-- `app.js` owns Web Bluetooth selection, GATT connection, newline framing,
-  sequential 20-byte writes, timers, and tile rendering.
-- Firmware owns BLE advertising, queued callback events, framing, hardware
-  input, elapsed-time measurement, and panel feedback.
+- `app.js` owns Web Bluetooth selection, GATT connection, discovery JSON
+  framing, atomic gameplay packets, timers, score, and tile rendering.
+- Firmware owns BLE advertising, queued callback events, binary packet
+  validation, hardware input, elapsed-time measurement, timeout, and immediate
+  panel verdicts. It does not receive or display score.
 
 No database, accounts, multiplayer roster, frontend framework, package
 manifest, Wi-Fi, WebSocket endpoint, or reconnect/resume game is included.
 A disconnect abandons the active board round; the page can select a board again.
 Stop/restart invalidates queued browser effects. Restart serializes a resetting
-`game.stop` before its first instruction and uses fresh opaque round IDs, so
-firmware fallback state and stale browser/board work cannot affect the new game.
+6-byte stop before its first instruction and uses a fresh numeric session, so
+stale browser/board work cannot affect the new game.
 
 ## Verification
 
 - `go test ./...`
-- `node --test game.test.mjs`
+- `node --test app.test.mjs game.test.mjs`
 - `pio run -e amoled18`
 - Browser and physical-board smoke test in Chromium on localhost

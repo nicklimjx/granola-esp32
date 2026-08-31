@@ -19,15 +19,13 @@ export class Game {
   }
 
   acceptReady(message) {
-    if (message?.type !== "board.ready" || message.protocolVersion !== 1 ||
+    if (message?.type !== "board.ready" || message.protocolVersion !== 2 ||
         !message.boardId || !Array.isArray(message.supportedActions) ||
-        message.supportedActions.length === 0 || message.supportedActions.some(action => !action)) {
+        message.supportedActions.length === 0 ||
+        message.supportedActions.some(action => actionCode(action) === 0)) {
       throw new Error("invalid board.ready");
     }
-    this.board = {
-      boardId: message.boardId,
-      supportedActions: [...message.supportedActions],
-    };
+    this.board = { boardId: message.boardId, supportedActions: [...message.supportedActions] };
     if (!this.started) this.status = "waiting";
     return [];
   }
@@ -41,57 +39,61 @@ export class Game {
     this.status = "disconnected";
     this.lastVerdict = null;
     this.lastElapsedMs = undefined;
-    this.runId += 1;
+    this.#newRun();
   }
 
   start() {
     if (!this.board || this.started || this.status === "stopped" || this.status === "complete") return [];
     this.started = true;
-    this.runId += 1;
+    this.#newRun();
     return this.#nextInstruction();
   }
 
   stop() {
     if (!this.board || !this.started) return [];
+    const session = this.runId;
     this.started = false;
     this.active = null;
     this.status = "stopped";
-    return [{ type: "send", message: { type: "game.stop", reset: false } }];
+    return [{ type: "send", message: { type: "game.stop", session, reset: false } }];
   }
 
   restart() {
     if (!this.board || (this.status !== "stopped" && this.status !== "complete")) return [];
+    const oldSession = this.runId;
     this.started = true;
     this.step = 0;
     this.score = 0;
     this.active = null;
     this.lastVerdict = null;
     this.lastElapsedMs = undefined;
-    this.runId += 1;
+    this.#newRun();
     return [
-      { type: "send", message: { type: "game.stop", reset: true } },
+      { type: "send", message: { type: "game.stop", session: oldSession, reset: true } },
       ...this.#nextInstruction(),
     ];
   }
 
-  actionDetected(message) {
-    if (message?.type !== "action.detected" || !this.active ||
-        message.roundId !== this.active.roundId || !Number.isFinite(message.elapsedMs) ||
-        message.elapsedMs < 0) return [];
+  roundEnded(message) {
+    if (message?.type !== "round.ended" || !this.active ||
+        message.session !== this.active.session || message.round !== this.active.round ||
+        !Number.isInteger(message.actionCode) || !Number.isInteger(message.elapsedMs)) return [];
 
-    let result = "success";
-    if (message.elapsedMs > this.active.timeoutMs) result = "timeout";
-    else if (message.action !== this.active.action) result = "wrong_action";
+    let result;
+    if (message.actionCode === 0 || message.elapsedMs > this.active.timeoutMs) result = "timeout";
+    else if (message.actionCode !== this.active.actionCode) result = "wrong_action";
+    else result = "success";
     return this.#finish(result, message.elapsedMs);
   }
 
-  watchdog(roundId) {
-    if (!this.active || this.active.roundId !== roundId) return [];
+  watchdog(session, round) {
+    if (!this.active || this.active.session !== session || this.active.round !== round) return [];
     return this.#finish("timeout");
   }
 
-  advance(roundId) {
-    if (this.active || !this.started || `${this.runId}:${this.step}` !== roundId || this.step >= TOTAL_STEPS) return [];
+  advance(session, round) {
+    if (this.active || !this.started || this.runId !== session || this.step !== round ||
+        this.step >= TOTAL_STEPS) return [];
     return this.#nextInstruction();
   }
 
@@ -110,6 +112,10 @@ export class Game {
     };
   }
 
+  #newRun() {
+    this.runId = (this.runId + 1) >>> 0;
+  }
+
   #nextInstruction() {
     if (this.step >= TOTAL_STEPS) {
       this.started = false;
@@ -119,23 +125,26 @@ export class Game {
     this.step += 1;
     const actions = this.board.supportedActions;
     const index = Math.min(actions.length - 1, Math.floor(this.random() * actions.length));
+    const action = actions[index];
     const instruction = {
       type: "instruction",
-      roundId: `${this.runId}:${this.step}`,
-      action: actions[index],
+      session: this.runId,
+      round: this.step,
+      action,
+      actionCode: actionCode(action),
       timeoutMs: ACTION_WINDOWS_MS[Math.floor((this.step - 1) / STEPS_PER_TIER)],
     };
     this.active = instruction;
     this.status = "playing";
     return [
       { type: "send", message: instruction },
-      { type: "schedule", event: "watchdog", roundId: instruction.roundId,
-        delayMs: instruction.timeoutMs + WATCHDOG_GRACE_MS },
+      { type: "schedule", event: "watchdog", session: instruction.session,
+        round: instruction.round, delayMs: instruction.timeoutMs + WATCHDOG_GRACE_MS },
     ];
   }
 
   #finish(result, elapsedMs) {
-    const roundId = this.active.roundId;
+    const { session, round } = this.active;
     this.active = null;
     this.lastVerdict = result;
     this.lastElapsedMs = elapsedMs;
@@ -147,10 +156,14 @@ export class Game {
       this.status = "feedback";
     }
     return [
-      { type: "send", message: { type: "round.result", roundId, result, score: this.score } },
+      { type: "audio.stop" },
       ...(this.step < TOTAL_STEPS
-        ? [{ type: "schedule", event: "advance", roundId, delayMs: FEEDBACK_HOLD_MS }]
+        ? [{ type: "schedule", event: "advance", session, round, delayMs: FEEDBACK_HOLD_MS }]
         : []),
     ];
   }
+}
+
+export function actionCode(action) {
+  return ({ tap: 1, twist: 2, swipe: 3, press: 4 })[action] ?? 0;
 }

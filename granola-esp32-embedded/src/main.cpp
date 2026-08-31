@@ -26,13 +26,10 @@ void setup() {
   ui.showStatus("BOP IT", "connecting...");
 
   bleLink.onConnection([](bool connected) { game.onConnectionChange(connected); });
-  bleLink.onInstruction([](const char* roundId, Action action, uint32_t timeoutMs) {
-    game.onInstruction(roundId, action, timeoutMs);
+  bleLink.onInstruction([](uint32_t session, uint8_t round, Action action, uint16_t timeoutMs) {
+    game.onInstruction(session, round, action, timeoutMs);
   });
-  bleLink.onRoundResult([](const char* roundId, RoundOutcome outcome, int32_t score) {
-    game.onRoundResult(roundId, outcome, score);
-  });
-  bleLink.onStop([](bool reset) { game.stop(reset); });
+  bleLink.onStop([](uint32_t session, bool reset) { game.stop(session, reset); });
   game.begin(&bleLink, &input, &ui);
 
   BleLink::Config config;
